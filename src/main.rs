@@ -1,6 +1,8 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::collections::HashMap;
+use petgraph::graphmap::UnGraphMap;
+use petgraph::dot::{Config, Dot};
 
 const DATA_FILE: &'static str = "./data/spatial_data.csv";
 const META_FILE: &'static str = "./data/spatial_metadata.csv";
@@ -18,7 +20,7 @@ fn main() {
     for distance in similarities.iter() {
         if distance.2 < 200.0 {
             println!("Cell A id {} loc {:?} total {} Cell B id {} loc {:?} total {} Gene_distance {}", distance.0.cell_id, distance.0.spatial_location, distance.0.total_count, distance.1.cell_id, distance.1.spatial_location, distance.1.total_count, distance.2);
-             count_0_distance += 1;
+            count_0_distance += 1;
         }
     }
     println!("Distances count: {}", count_0_distance);
@@ -30,12 +32,42 @@ fn main() {
     println!("Median: {}", lengths[lengths.len() / 2] as f64);
 
     // make the initial graph using pet graph
+    make_the_graph(&cell_data, similarities);
+    // go through connected sections and make connection by em
 
-    // connect the exact similar cells
+    // cluster the graph Stoer–Wagner algorithm
 
-    // add neighbouring cells to graph
+}
 
-    // cluster the graph
+fn make_the_graph(cell_data: &Vec<CellData>, similarities: Vec<(&CellData, &CellData, f64)>) {
+    // initialize the graph
+    let mut g = UnGraphMap::<(usize, usize), usize>::new();
+    // make the nodes
+    for cell in cell_data {
+        g.add_node(cell.spatial_location);
+    }
+    // make edges using similarities, distance < 200
+    for distance in similarities.iter() {
+        if distance.2 < 500.0 {
+            println!("Cell A id {} loc {:?} total {} Cell B id {} loc {:?} total {} Gene_distance {}", distance.0.cell_id, distance.0.spatial_location, distance.0.total_count, distance.1.cell_id, distance.1.spatial_location, distance.1.total_count, distance.2);
+            // make edge of weight 100
+            g.add_edge(distance.0.spatial_location, distance.1.spatial_location, 100);
+        }
+    }
+    // draw the graph to see
+    //et basic_dot = Dot::new(&g);
+    let dot = Dot::with_attr_getters(
+        &g,
+        &[Config::NodeNoLabel], // Optional: hide default node index labels
+        &|_, _| "".to_string(), // Edge attributes
+        &|_, node| {
+            let (x, y) = node.1;
+            // Graphviz pos uses "x,y!" for fixed positions
+            format!("pos=\"{},{}!\"", x, y)
+        },
+    );
+    println!("DOT format:\n{:?}\n", dot);
+    // gephi draw
 }
 
 fn squared_error(a: &[u16], b: &[u16]) -> f64 {
@@ -89,6 +121,10 @@ fn find_similar_close_by_cells(cells: &Vec<CellData>) -> (Vec<(&CellData, &CellD
 
 // load spatial data and populate celldata vec
 fn data_loader_spatial() -> Vec<CellData> {
+    // for testing load only the cells in a small area 
+    let x_limit = 33_000; //225 cells when x and y 33_000
+    let y_limit = 33_000;
+    let mut process_cells = vec![];
     println!("Start Meta Data Loading");
     // make a hashmap for look up of spatial locaiton of cell id
     let mut spatial_lookup: HashMap<String, (usize, usize)> = HashMap::new();
@@ -114,13 +150,17 @@ fn data_loader_spatial() -> Vec<CellData> {
         // first line has the cell ids
         if line_index == 0 {
             // save the values in a vector, cell id_fov_etc
-            for value in values {
+            for (value_index, value) in values.iter().enumerate() {
                 let cell_id = value.trim().to_string();
                 // using the hashmap find the spatial location
                 let (spatial_location_x, spatial_location_y) = spatial_lookup.get(&cell_id).cloned().unwrap_or((0, 0));
-                let temp_cell_data = CellData::new(cell_id, (spatial_location_x, spatial_location_y));
-                all_cell_data.push(temp_cell_data);
+                if (spatial_location_x < x_limit) && (spatial_location_y < y_limit) {
+                    process_cells.push(value_index);
+                    let temp_cell_data = CellData::new(cell_id, (spatial_location_x, spatial_location_y));
+                    all_cell_data.push(temp_cell_data);
+                }
             }
+            println!("{}", all_cell_data.len());
             continue;
         }
         let mut gene_expressed_by_cells = 0;
@@ -134,14 +174,19 @@ fn data_loader_spatial() -> Vec<CellData> {
         }
         if gene_expressed_by_cells > GENE_CELL_CUTOFF {
             println!("gene {} passed", line_index);
+            let mut real_cell_index = 0;
             for (cell_index, value) in values.iter().enumerate() {
+                if !process_cells.contains(&cell_index) {
+                    continue;
+                }
                 // convert to u32 and add to cell data
                 let read_count = value.to_string().parse::<u16>().unwrap();
-                all_cell_data[cell_index].read_counts.push(read_count);
-                all_cell_data[cell_index].total_count += read_count as usize;
+                all_cell_data[real_cell_index].read_counts.push(read_count);
+                all_cell_data[real_cell_index].total_count += read_count as usize;
                 if read_count > 0 {
-                    all_cell_data[cell_index].genes_with_count += 1;
+                    all_cell_data[real_cell_index].genes_with_count += 1;
                 }
+                real_cell_index += 1;
             }
         }
     }
