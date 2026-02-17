@@ -8,29 +8,36 @@ const COUNT_FILE: &'static str = "./data/cerebellum_count.csv";
 const COOR_FILE: &'static str = "./data/cerebellum_coor.csv";
 const GLM_FILE: &'static str = "./data/cerebellum_glm.csv";
 const GENE_CELL_CUTOFF: usize = 3000;
-const COUNT_DIFF_FOR_SIMILAR: usize = 100;
-const CELL_CONNECT_DISTANCE: f32 = 1000.0; //use L2 and see // for 1000 median 14 // for 500 median 5
+const COUNT_DIFF_FOR_SIMILAR: usize = 500;
+const CELL_CONNECT_DISTANCE: isize = 5_000; //use L2 and see // for 1000 median 14 // for 500 median 5
 
 fn main() {
     // load the data
     let cell_data = data_loader_spatial();
-    // println!("Number of cells: {}", cell_data.len());
+    println!("Number of cells: {}", cell_data.len());
     // // find the similar cells (exact same if any)
-    // let (similarities, map) = find_similar_close_by_cells(&cell_data);
-    // let mut count_0_distance = 0;
-    // for distance in similarities.iter() {
-    //     if distance.2 < 200.0 {
-    //         println!("Cell A id {} loc {:?} total {} Cell B id {} loc {:?} total {} Gene_distance {}", distance.0.cell_id, distance.0.spatial_location, distance.0.total_count, distance.1.cell_id, distance.1.spatial_location, distance.1.total_count, distance.2);
-    //         count_0_distance += 1;
-    //     }
-    // }
-    // println!("Distances count: {}", count_0_distance);
+    let (similarities, map) = find_similar_close_by_cells(&cell_data);
+    let mut count_0_distance = 0;
+    for distance in similarities.iter() {
+        if distance.2 < 500.0 {
+            println!("Cell A id {} loc {:?} total {} Cell B id {} loc {:?} total {} Gene_distance {}", distance.0.cell_id, distance.0.spatial_location, distance.0.total_count, distance.1.cell_id, distance.1.spatial_location, distance.1.total_count, distance.2);
+            count_0_distance += 1;
+        }
+    }
+    println!("Distances count: {}", count_0_distance);
     // // check median of map
-    // let mut lengths: Vec<usize> = map.values().map(|v| v.len()).collect();
-    // let sum: usize = lengths.iter().sum();
-    // println!("Average: {}", sum as f64 / lengths.len() as f64);
-    // lengths.sort_unstable();
-    // println!("Median: {}", lengths[lengths.len() / 2] as f64);
+    let mut lengths: Vec<usize> = map.values().map(|v| v.len()).collect();
+    let sum: usize = lengths.iter().sum();
+    println!("Average: {}", sum as f64 / lengths.len() as f64);
+    lengths.sort_unstable();
+    println!("Median: {}", lengths[lengths.len() / 2] as f64);
+    let mut zero_lens = 0;
+    for length in lengths {
+        if length == 1 {
+            zero_lens += 1;
+        }
+    }
+    println!("zero neighbour cells {}", zero_lens);
 
     // // make the initial graph using pet graph
     // make_the_graph(&cell_data, similarities);
@@ -71,53 +78,56 @@ fn make_the_graph(cell_data: &Vec<CellData>, similarities: Vec<(&CellData, &Cell
     // gephi draw
 }
 
-fn squared_error(a: &[u16], b: &[u16]) -> f64 {
-    let sum: f64 = a.iter()
+fn squared_error(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
         .zip(b.iter())
         .map(|(x, y)| {
-            let diff = *x as f64 - *y as f64;
+            let diff = *x - *y;
             diff * diff
         })
-        .sum();
-    sum as f64
+        .sum()
 }
 
-fn find_similar_close_by_cells(cells: &Vec<CellData>)  {
-    // // squared distance of read count difference in two cells
-    // let mut gene_distances = Vec::new();
-    // // hash map for keeping track of close by cells for each coordinate
-    // let mut map: HashMap<(f32, f32), Vec<&CellData>> = HashMap::new();
-    // for i in 0..cells.len() {
-    //     let cell_a = &cells[i];
-    //     let (cell_a_x, cell_a_y) = cell_a.spatial_location;
-    //     // add to hashmap cell a
-    //     map.insert((cell_a_x, cell_a_y), vec![cell_a]);
-    //     for j in (i + 1)..cells.len() {
-    //         let cell_b = &cells[j];
-    //         let (cell_b_x, cell_b_y) = cell_b.spatial_location;
-    //         // check read count vecs font match
-    //         if cell_a.read_counts.len() != cell_b.read_counts.len(){
-    //             continue;
-    //         }
-    //         // check if within count difference
-    //         if cell_a.total_count.abs_diff(cell_b.total_count) > COUNT_DIFF_FOR_SIMILAR {
-    //             continue;
-    //         }
-    //         // check if cells are within distance L2
-    //         if ((cell_a_x.abs() - cell_b_x.abs()).powf(2.0) + (cell_a_y.abs() - cell_b_y.abs()).powf(2.0)).sqrt()
-    //         > CELL_CONNECT_DISTANCE {
-    //             continue;
-    //         }
-    //         // cell b is near spatial coordianates of cell a, add to hashmap
-    //         if let Some(vec_value) = map.get_mut(&(cell_a_x, cell_a_y)) {
-    //             vec_value.push(cell_b);
-    //         }
-    //         let mse = squared_error(&cell_a.read_counts, &cell_b.read_counts);
-    //         gene_distances.push((cell_a, cell_b, mse));
-    //     }
-    // }
-    // gene_distances.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
-    // (gene_distances, map)
+
+fn find_similar_close_by_cells(cells: &Vec<CellData>) -> (Vec<(&CellData, &CellData, f32)>, HashMap<(isize, isize), Vec<&CellData>>) {
+    // squared distance of read count difference in two cells
+    let mut gene_distances = Vec::new();
+    // hash map for keeping track of close by cells for each coordinate
+    let mut map: HashMap<(isize, isize), Vec<&CellData>> = HashMap::new();
+    for i in 0..cells.len() {
+        let cell_a = &cells[i];
+        // multiply by 100 and save it as usize
+        let cell_a_x = (cell_a.spatial_location.0 * 100.0) as isize;
+        let cell_a_y = (cell_a.spatial_location.1 * 100.0) as isize;
+        // add to hashmap cell a
+        map.insert((cell_a_x, cell_a_y), vec![cell_a]);
+        for j in (i + 1)..cells.len() {
+            let cell_b = &cells[j];
+            let cell_b_x = (cell_b.spatial_location.0 * 100.0) as isize;
+            let cell_b_y = (cell_b.spatial_location.1 * 100.0) as isize;
+            // check if cells are within distance L2
+            if ((cell_a_x.abs() - cell_b_x.abs()).pow(2) + (cell_a_y.abs() - cell_b_y.abs()).pow(2)).isqrt()
+            > CELL_CONNECT_DISTANCE {
+                continue;
+            }
+            // cell b is near spatial coordianates of cell a, add to hashmap
+            if let Some(vec_value) = map.get_mut(&(cell_a_x, cell_a_y)) {
+                vec_value.push(cell_b);
+            }
+            // check read count vecs font match
+            if cell_a.read_counts.len() != cell_b.read_counts.len(){
+                continue;
+            }
+            // check if within count difference
+            if cell_a.total_count.abs_diff(cell_b.total_count) > COUNT_DIFF_FOR_SIMILAR {
+                continue;
+            }
+            let mse = squared_error(&cell_a.glm_data, &cell_b.glm_data);
+            gene_distances.push((cell_a, cell_b, mse));
+        }
+    }
+    gene_distances.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+    (gene_distances, map)
 }
 
 // load spatial data and populate celldata vec
