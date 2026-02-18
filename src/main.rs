@@ -1,17 +1,23 @@
+mod leiden_alg;
+
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::collections::HashMap;
 use petgraph::graphmap::UnGraphMap;
 use petgraph::dot::{Config, Dot};
+use leiden_alg::{Graph, TrivialModularityOptimizer};
+
 
 const COUNT_FILE: &'static str = "./data/cerebellum_count.csv";
 const COOR_FILE: &'static str = "./data/cerebellum_coor.csv";
 const GLM_FILE: &'static str = "./data/cerebellum_glm.csv";
 const GENE_CELL_CUTOFF: usize = 3000;
 const COUNT_DIFF_FOR_SIMILAR: usize = 500;
-const CELL_CONNECT_DISTANCE: isize = 5_000; //use L2 and see // for 1000 median 14 // for 500 median 5
+//const CELL_CONNECT_DISTANCE: isize = 10_000; //use L2 and see // for 1000 median 14 // for 500 median 5
 
 fn main() {
+    // test leiden 
+    //leiden_test();
     // load the data
     let cell_data = data_loader_spatial();
     println!("Number of cells: {}", cell_data.len());
@@ -19,7 +25,7 @@ fn main() {
     let (similarities, map) = find_similar_close_by_cells(&cell_data);
     let mut count_0_distance = 0;
     for distance in similarities.iter() {
-        if distance.2 < 500.0 {
+        if distance.2 > (1.0 / 500.0) {
             println!("Cell A id {} loc {:?} total {} Cell B id {} loc {:?} total {} Gene_distance {}", distance.0.cell_id, distance.0.spatial_location, distance.0.total_count, distance.1.cell_id, distance.1.spatial_location, distance.1.total_count, distance.2);
             count_0_distance += 1;
         }
@@ -31,12 +37,7 @@ fn main() {
     println!("Average: {}", sum as f64 / lengths.len() as f64);
     lengths.sort_unstable();
     println!("Median: {}", lengths[lengths.len() / 2] as f64);
-    let mut zero_lens = 0;
-    for length in lengths {
-        if length == 1 {
-            zero_lens += 1;
-        }
-    }
+    let zero_lens = lengths.iter().filter(|&&l| l == 1).count();
     println!("zero neighbour cells {}", zero_lens);
 
     // // make the initial graph using pet graph
@@ -45,6 +46,54 @@ fn main() {
 
     // // cluster the graph Stoer–Wagner algorithm
 
+}
+
+fn leiden_test() {
+    let mut nodes: HashMap<&'static str, usize> = HashMap::new();
+    let mut g = Graph::new();
+    let edges: &[(&'static str, &'static str, f32)] = &[
+        ("Fortran", "C", 0.5),
+        ("Fortran", "LISP", 0.3),
+        ("Fortran", "MATLAB", 0.6),
+        ("C", "C++", 0.9),
+        ("C", "Go", 0.6),
+        ("LISP", "ML", 0.5),
+        ("LISP", "OCaml", 0.2),
+        ("LISP", "Haskell", 0.2),
+        ("LISP", "Ruby", 0.5),
+        ("LISP", "Julia", 0.6),
+        ("ML", "OCaml", 0.8),
+        ("ML", "Haskell", 0.5),
+        ("OCaml", "Haskell", 0.3),
+        ("OCaml", "F#", 0.6),
+        ("Haskell", "Julia", 0.2),
+        ("C++", "Python", 0.32),
+        ("C++", "Ruby", 0.2),
+        ("C++", "C#", 0.5),
+        ("Python", "F#", 0.2),
+        ("Python", "Julia", 0.4),
+        ("C#", "F#", 0.3),
+    ];
+
+    for (from, to, weight) in edges.iter() {
+        let from_id = *nodes.entry(from).or_insert_with(|| g.add_node(from));
+        let to_id = *nodes.entry(to).or_insert_with(|| g.add_node(to));
+        g.add_edge(from_id, to_id, (), *weight);
+    }
+
+    let mut optimizer = TrivialModularityOptimizer {
+            parallel_scale: 128,
+            tol: 1e-11,
+        };
+
+        let hierarchy = g.leiden(Some(100), &mut optimizer);
+        for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
+            println!("community {}:", i);
+            node.collect_nodes(&|i| {
+                let n = g.node_data_slice()[i];
+                println!("     {}", n);
+            });
+        }
 }
 
 fn make_the_graph(cell_data: &Vec<CellData>, similarities: Vec<(&CellData, &CellData, f64)>) {
@@ -90,44 +139,59 @@ fn squared_error(a: &[f32], b: &[f32]) -> f32 {
 
 
 fn find_similar_close_by_cells(cells: &Vec<CellData>) -> (Vec<(&CellData, &CellData, f32)>, HashMap<(isize, isize), Vec<&CellData>>) {
+    // change the distance so that no cell is alone
+    let radius_to_check = vec![10, 100, 500, 1_000, 2_000, 5_000, 10_000, 15_000, 20_000];
     // squared distance of read count difference in two cells
     let mut gene_distances = Vec::new();
     // hash map for keeping track of close by cells for each coordinate
-    let mut map: HashMap<(isize, isize), Vec<&CellData>> = HashMap::new();
-    for i in 0..cells.len() {
-        let cell_a = &cells[i];
-        // multiply by 100 and save it as usize
-        let cell_a_x = (cell_a.spatial_location.0 * 100.0) as isize;
-        let cell_a_y = (cell_a.spatial_location.1 * 100.0) as isize;
-        // add to hashmap cell a
-        map.insert((cell_a_x, cell_a_y), vec![cell_a]);
-        for j in (i + 1)..cells.len() {
-            let cell_b = &cells[j];
-            let cell_b_x = (cell_b.spatial_location.0 * 100.0) as isize;
-            let cell_b_y = (cell_b.spatial_location.1 * 100.0) as isize;
-            // check if cells are within distance L2
-            if ((cell_a_x.abs() - cell_b_x.abs()).pow(2) + (cell_a_y.abs() - cell_b_y.abs()).pow(2)).isqrt()
-            > CELL_CONNECT_DISTANCE {
-                continue;
+    let mut close_by_map: HashMap<(isize, isize), Vec<&CellData>> = HashMap::new();
+    'radi_loop: for radius in radius_to_check {
+        for i in 0..cells.len() {
+            let cell_a = &cells[i];
+            // multiply by 100 and save it as usize
+            let cell_a_x = (cell_a.spatial_location.0 * 100.0) as isize;
+            let cell_a_y = (cell_a.spatial_location.1 * 100.0) as isize;
+            // add to hashmap cell a
+            close_by_map.insert((cell_a_x, cell_a_y), vec![cell_a]);
+            for j in (i + 1)..cells.len() {
+                let cell_b = &cells[j];
+                let cell_b_x = (cell_b.spatial_location.0 * 100.0) as isize;
+                let cell_b_y = (cell_b.spatial_location.1 * 100.0) as isize;
+                // check if cells are within distance L2
+                if ((cell_a_x.abs() - cell_b_x.abs()).pow(2) + (cell_a_y.abs() - cell_b_y.abs()).pow(2)).isqrt()
+                > radius {
+                    continue;
+                }
+                // cell b is near spatial coordianates of cell a, add to hashmap
+                if let Some(vec_value) = close_by_map.get_mut(&(cell_a_x, cell_a_y)) {
+                    vec_value.push(cell_b);
+                }
+                // check read count vecs font match
+                if cell_a.read_counts.len() != cell_b.read_counts.len(){
+                    continue;
+                }
+                // check if within count difference
+                if cell_a.total_count.abs_diff(cell_b.total_count) > COUNT_DIFF_FOR_SIMILAR {
+                    continue;
+                }
+                let mse = squared_error(&cell_a.glm_data, &cell_b.glm_data);
+                gene_distances.push((cell_a, cell_b, (1.0 / mse)));
             }
-            // cell b is near spatial coordianates of cell a, add to hashmap
-            if let Some(vec_value) = map.get_mut(&(cell_a_x, cell_a_y)) {
-                vec_value.push(cell_b);
-            }
-            // check read count vecs font match
-            if cell_a.read_counts.len() != cell_b.read_counts.len(){
-                continue;
-            }
-            // check if within count difference
-            if cell_a.total_count.abs_diff(cell_b.total_count) > COUNT_DIFF_FOR_SIMILAR {
-                continue;
-            }
-            let mse = squared_error(&cell_a.glm_data, &cell_b.glm_data);
-            gene_distances.push((cell_a, cell_b, mse));
+        }
+        let lengths: Vec<usize> = close_by_map.values().map(|v| v.len()).collect();
+        let zero_lens = lengths.iter().filter(|&&l| l == 1).count();
+        println!("zero neighbour cells {} for radius {}", zero_lens, radius);
+        if zero_lens < (lengths.len() / 15) {
+            break 'radi_loop;
+        }
+        else {
+            gene_distances.clear();
+            close_by_map.clear();
         }
     }
-    gene_distances.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
-    (gene_distances, map)
+    
+    gene_distances.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+    (gene_distances, close_by_map)
 }
 
 // load spatial data and populate celldata vec
