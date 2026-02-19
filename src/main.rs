@@ -16,8 +16,6 @@ const COUNT_DIFF_FOR_SIMILAR: usize = 500;
 //const CELL_CONNECT_DISTANCE: isize = 10_000; //use L2 and see // for 1000 median 14 // for 500 median 5
 
 fn main() {
-    // test leiden 
-    //leiden_test();
     // load the data
     let cell_data = data_loader_spatial();
     println!("Number of cells: {}", cell_data.len());
@@ -25,7 +23,7 @@ fn main() {
     let (similarities, map) = find_similar_close_by_cells(&cell_data);
     let mut count_0_distance = 0;
     for distance in similarities.iter() {
-        if distance.2 > (1.0 / 500.0) {
+        if distance.2 > (1.0 / 1_000.0) {
             println!("Cell A id {} loc {:?} total {} Cell B id {} loc {:?} total {} Gene_distance {}", distance.0.cell_id, distance.0.spatial_location, distance.0.total_count, distance.1.cell_id, distance.1.spatial_location, distance.1.total_count, distance.2);
             count_0_distance += 1;
         }
@@ -45,7 +43,41 @@ fn main() {
     // // go through connected sections and make connection by em
 
     // // cluster the graph Stoer–Wagner algorithm
+    // leiden run
+    leiden_run(similarities);
+}
 
+fn leiden_run(similarities: Vec<(&CellData, &CellData, f32)>) {
+    let mut nodes: HashMap<&str, usize> = HashMap::new();
+    let mut g = Graph::new();
+    for distance in similarities.iter() {
+        if distance.2 > (1.0 / 2_000.0) {
+            println!("Cell A id {} loc {:?} total {} Cell B id {} loc {:?} total {} Gene_distance {}", distance.0.cell_id, distance.0.spatial_location, distance.0.total_count, distance.1.cell_id, distance.1.spatial_location, distance.1.total_count, distance.2);
+            //count_0_distance += 1;
+            // add to graph
+            let from = &distance.0.cell_id;
+            let to = &distance.1.cell_id;
+            let weight = distance.2;
+            let from_id = *nodes.entry(&from).or_insert_with(|| g.add_node(from.clone()));
+            let to_id = *nodes.entry(&to).or_insert_with(|| g.add_node(to.clone()));
+            g.add_edge(from_id, to_id, (), weight);
+        }
+    }
+    println!("Graph done");
+    let mut optimizer = TrivialModularityOptimizer {
+            parallel_scale: 32,
+            tol: 1e-11,
+    };
+    println!("Start Clustering");
+    let hierarchy = g.leiden(Some(10), &mut optimizer);
+    println!("Clustering Done");
+    for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
+        println!("community {}:", i);
+        node.collect_nodes(&|i| {
+            let n = &g.node_data_slice()[i];
+            println!("     {}", n);
+        });
+    }
 }
 
 fn leiden_test() {
@@ -86,14 +118,14 @@ fn leiden_test() {
             tol: 1e-11,
         };
 
-        let hierarchy = g.leiden(Some(100), &mut optimizer);
-        for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
-            println!("community {}:", i);
-            node.collect_nodes(&|i| {
-                let n = g.node_data_slice()[i];
-                println!("     {}", n);
-            });
-        }
+    let hierarchy = g.leiden(Some(100), &mut optimizer);
+    for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
+        println!("community {}:", i);
+        node.collect_nodes(&|i| {
+            let n = g.node_data_slice()[i];
+            println!("     {}", n);
+        });
+    }
 }
 
 fn make_the_graph(cell_data: &Vec<CellData>, similarities: Vec<(&CellData, &CellData, f64)>) {
@@ -140,11 +172,12 @@ fn squared_error(a: &[f32], b: &[f32]) -> f32 {
 
 fn find_similar_close_by_cells(cells: &Vec<CellData>) -> (Vec<(&CellData, &CellData, f32)>, HashMap<(isize, isize), Vec<&CellData>>) {
     // change the distance so that no cell is alone
-    let radius_to_check = vec![10, 100, 500, 1_000, 2_000, 5_000, 10_000, 15_000, 20_000];
+    let radius_to_check = vec![500, 1_000, 2_000, 5_000, 10_000, 15_000, 20_000];
     // squared distance of read count difference in two cells
     let mut gene_distances = Vec::new();
     // hash map for keeping track of close by cells for each coordinate
     let mut close_by_map: HashMap<(isize, isize), Vec<&CellData>> = HashMap::new();
+    let mut return_map: HashMap<(isize, isize), Vec<&CellData>> = HashMap::new();
     'radi_loop: for radius in radius_to_check {
         for i in 0..cells.len() {
             let cell_a = &cells[i];
@@ -181,7 +214,7 @@ fn find_similar_close_by_cells(cells: &Vec<CellData>) -> (Vec<(&CellData, &CellD
         let lengths: Vec<usize> = close_by_map.values().map(|v| v.len()).collect();
         let zero_lens = lengths.iter().filter(|&&l| l == 1).count();
         println!("zero neighbour cells {} for radius {}", zero_lens, radius);
-        if zero_lens < (lengths.len() / 15) {
+        if zero_lens < (lengths.len() / 20) {
             break 'radi_loop;
         }
         else {

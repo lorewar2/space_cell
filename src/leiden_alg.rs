@@ -43,6 +43,7 @@ impl Community {
     pub fn collect_nodes(&self, f: &impl Fn(usize)) {
         match self {
             Community::L1Community(nodes) => {
+                println!("nodes {}", nodes.len());
                 for &node in nodes.iter() {
                     f(node);
                 }
@@ -515,6 +516,7 @@ impl<N: Send + Sync, E: Send + Sync> Graph<N, E> {
                     break;
                 }
                 max_iter -= 1;
+                println!("Iterations left: {}", max_iter);
             }
         } else {
             loop {
