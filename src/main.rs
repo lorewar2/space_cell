@@ -16,8 +16,11 @@ const COUNT_DIFF_FOR_SIMILAR: usize = 500;
 //const CELL_CONNECT_DISTANCE: isize = 10_000; //use L2 and see // for 1000 median 14 // for 500 median 5
 
 fn main() {
+    leiden_test();
+    return;
     // load the data
     let cell_data = data_loader_spatial();
+    
     println!("Number of cells: {}", cell_data.len());
     // // find the similar cells (exact same if any)
     let (similarities, map) = find_similar_close_by_cells(&cell_data);
@@ -47,38 +50,6 @@ fn main() {
     leiden_run(similarities);
 }
 
-fn leiden_run(similarities: Vec<(&CellData, &CellData, f32)>) {
-    let mut nodes: HashMap<&str, usize> = HashMap::new();
-    let mut g = Graph::new();
-    for distance in similarities.iter() {
-        if distance.2 > (1.0 / 2_000.0) {
-            println!("Cell A id {} loc {:?} total {} Cell B id {} loc {:?} total {} Gene_distance {}", distance.0.cell_id, distance.0.spatial_location, distance.0.total_count, distance.1.cell_id, distance.1.spatial_location, distance.1.total_count, distance.2);
-            //count_0_distance += 1;
-            // add to graph
-            let from = &distance.0.cell_id;
-            let to = &distance.1.cell_id;
-            let weight = distance.2;
-            let from_id = *nodes.entry(&from).or_insert_with(|| g.add_node(from.clone()));
-            let to_id = *nodes.entry(&to).or_insert_with(|| g.add_node(to.clone()));
-            g.add_edge(from_id, to_id, (), weight);
-        }
-    }
-    println!("Graph done");
-    let mut optimizer = TrivialModularityOptimizer {
-            parallel_scale: 32,
-            tol: 1e-11,
-    };
-    println!("Start Clustering");
-    let hierarchy = g.leiden(Some(10), &mut optimizer);
-    println!("Clustering Done");
-    for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
-        println!("community {}:", i);
-        node.collect_nodes(&|i| {
-            let n = &g.node_data_slice()[i];
-            println!("     {}", n);
-        });
-    }
-}
 
 fn leiden_test() {
     let mut nodes: HashMap<&'static str, usize> = HashMap::new();
@@ -113,16 +84,46 @@ fn leiden_test() {
         g.add_edge(from_id, to_id, (), *weight);
     }
 
-    let mut optimizer = TrivialModularityOptimizer {
-            parallel_scale: 128,
-            tol: 1e-11,
-        };
+    let mut optimizer = TrivialModularityOptimizer {parallel_scale: 128, tol: 1e-11};
+    let hierarchy = g.leiden(Some(1), &mut optimizer);
 
-    let hierarchy = g.leiden(Some(100), &mut optimizer);
     for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
         println!("community {}:", i);
         node.collect_nodes(&|i| {
             let n = g.node_data_slice()[i];
+            println!("     {}", n);
+        });
+    }
+}
+
+fn leiden_run(similarities: Vec<(&CellData, &CellData, f32)>) {
+    let mut nodes: HashMap<&str, usize> = HashMap::new();
+    let mut g = Graph::new();
+    for distance in similarities.iter() {
+        if distance.2 > (1.0 / 2_000.0) {
+            println!("Cell A id {} loc {:?} total {} Cell B id {} loc {:?} total {} Gene_distance {}", distance.0.cell_id, distance.0.spatial_location, distance.0.total_count, distance.1.cell_id, distance.1.spatial_location, distance.1.total_count, distance.2);
+            //count_0_distance += 1;
+            // add to graph
+            let from = &distance.0.cell_id;
+            let to = &distance.1.cell_id;
+            let weight = distance.2;
+            let from_id = *nodes.entry(&from).or_insert_with(|| g.add_node(from.clone()));
+            let to_id = *nodes.entry(&to).or_insert_with(|| g.add_node(to.clone()));
+            g.add_edge(from_id, to_id, (), weight);
+        }
+    }
+    println!("Graph done");
+    let mut optimizer = TrivialModularityOptimizer {
+            parallel_scale: 32,
+            tol: 1e-11,
+    };
+    println!("Start Clustering");
+    let hierarchy = g.leiden(Some(10), &mut optimizer);
+    println!("Clustering Done");
+    for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
+        println!("community {}:", i);
+        node.collect_nodes(&|i| {
+            let n = &g.node_data_slice()[i];
             println!("     {}", n);
         });
     }
