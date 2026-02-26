@@ -2,6 +2,8 @@ mod leiden_alg;
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::io::Write;
+use std::fmt::Display;
 use std::collections::HashMap;
 use petgraph::graphmap::UnGraphMap;
 use petgraph::dot::{Config, Dot};
@@ -16,8 +18,7 @@ const COUNT_DIFF_FOR_SIMILAR: usize = 500;
 //const CELL_CONNECT_DISTANCE: isize = 10_000; //use L2 and see // for 1000 median 14 // for 500 median 5
 
 fn main() {
-    leiden_test();
-    return;
+    //leiden_test();
     // load the data
     let cell_data = data_loader_spatial();
     
@@ -50,6 +51,105 @@ fn main() {
     leiden_run(similarities);
 }
 
+fn leiden_run(similarities: Vec<(&CellData, &CellData, f32)>) {
+    let mut g = UnGraphMap::new();
+    let mut node_id_map: HashMap<String, usize> = HashMap::new();  // string → integer
+    let mut id_to_label: HashMap<usize, String> = HashMap::new();  // integer → string
+    let mut next_id = 0;
+    for distance in similarities.iter() {
+    if distance.2 > (1.0 / 2_000.0) {
+
+        let from_name = distance.0.cell_id.clone();
+        let to_name   = distance.1.cell_id.clone();
+
+        // assign integer IDs
+        let from_id = *node_id_map.entry(from_name.clone())
+            .or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id_to_label.insert(id, from_name.clone());  // map ID → label
+                id
+            });
+
+        let to_id = *node_id_map.entry(to_name.clone())
+            .or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id_to_label.insert(id, to_name.clone());    // map ID → label
+                id
+            });
+        let weight = distance.2;
+
+        // UnGraphMap automatically inserts nodes if missing
+        g.add_edge(from_id, to_id, distance.2);
+    }
+}
+    println!("Graph done");
+    let mut optimizer = TrivialModularityOptimizer {
+            parallel_scale: 32,
+            tol: 1e-11,
+    };
+    println!("Start Clustering");
+    //save graph and run in python for now
+    save_graphml(&g, &id_to_label, "languages.graphml");
+    // let hierarchy = g.leiden(Some(10), &mut optimizer);
+    // println!("Clustering Done");
+    // for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
+    //     println!("community {}:", i);
+    //     node.collect_nodes(&|i| {
+    //         let n = &g.node_data_slice()[i];
+    //         println!("     {}", n);
+    //     });
+    // }
+}
+
+fn save_graphml(g: &UnGraphMap<usize, f32>, id_to_label: &HashMap<usize, String>, path: &str) {
+    let mut file = File::create(path).expect("Failed to create GraphML file");
+
+    writeln!(file, r#"<?xml version="1.0" encoding="UTF-8"?>"#).unwrap();
+    writeln!(file, r#"<graphml xmlns="http://graphml.graphdrawing.org/xmlns">"#).unwrap();
+
+    // Node label key
+    writeln!(
+        file,
+        r#"<key id="label" for="node" attr.name="label" attr.type="string"/>"#
+    ).unwrap();
+
+    // Edge weight key
+    writeln!(
+        file,
+        r#"<key id="weight" for="edge" attr.name="weight" attr.type="double"/>"#
+    ).unwrap();
+
+    writeln!(file, r#"<graph edgedefault="undirected">"#).unwrap();
+
+    for node in g.nodes() {
+        let label = id_to_label.get(&node).unwrap();
+        writeln!(
+            file,
+            r#"<node id="n{}"><data key="label">{}</data></node>"#,
+            node, label
+        ).unwrap();
+    }
+
+    // Track written edges to avoid duplicates in undirected graph
+    let mut seen_edges = std::collections::HashSet::new();
+
+    for edge in g.all_edges() {
+        let (a, b, weight) = edge;
+        let key = if a < b { (a, b) } else { (b, a) };
+        if seen_edges.insert(key) {
+            writeln!(
+                file,
+                r#"<edge source="n{}" target="n{}"><data key="weight">{}</data></edge>"#,
+                a, b, weight
+            ).unwrap();
+        }
+    }
+
+    writeln!(file, "</graph>").unwrap();
+    writeln!(file, "</graphml>").unwrap();
+}
 
 fn leiden_test() {
     let mut nodes: HashMap<&'static str, usize> = HashMap::new();
@@ -91,39 +191,6 @@ fn leiden_test() {
         println!("community {}:", i);
         node.collect_nodes(&|i| {
             let n = g.node_data_slice()[i];
-            println!("     {}", n);
-        });
-    }
-}
-
-fn leiden_run(similarities: Vec<(&CellData, &CellData, f32)>) {
-    let mut nodes: HashMap<&str, usize> = HashMap::new();
-    let mut g = Graph::new();
-    for distance in similarities.iter() {
-        if distance.2 > (1.0 / 2_000.0) {
-            println!("Cell A id {} loc {:?} total {} Cell B id {} loc {:?} total {} Gene_distance {}", distance.0.cell_id, distance.0.spatial_location, distance.0.total_count, distance.1.cell_id, distance.1.spatial_location, distance.1.total_count, distance.2);
-            //count_0_distance += 1;
-            // add to graph
-            let from = &distance.0.cell_id;
-            let to = &distance.1.cell_id;
-            let weight = distance.2;
-            let from_id = *nodes.entry(&from).or_insert_with(|| g.add_node(from.clone()));
-            let to_id = *nodes.entry(&to).or_insert_with(|| g.add_node(to.clone()));
-            g.add_edge(from_id, to_id, (), weight);
-        }
-    }
-    println!("Graph done");
-    let mut optimizer = TrivialModularityOptimizer {
-            parallel_scale: 32,
-            tol: 1e-11,
-    };
-    println!("Start Clustering");
-    let hierarchy = g.leiden(Some(10), &mut optimizer);
-    println!("Clustering Done");
-    for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
-        println!("community {}:", i);
-        node.collect_nodes(&|i| {
-            let n = &g.node_data_slice()[i];
             println!("     {}", n);
         });
     }

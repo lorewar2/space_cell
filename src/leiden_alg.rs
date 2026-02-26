@@ -12,10 +12,10 @@ pub type CommunityId = u32;
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug)]
 pub struct Graph<N, E> {
-    _nodes: Vec<N>,
-    _edges: Vec<EdgeInfo<E>>,
-    _connections: Vec<HashMap<usize, usize>>,
-    _total_weight: f32,
+    pub _nodes: Vec<N>,
+    pub _edges: Vec<EdgeInfo<E>>,
+    pub _connections: Vec<HashMap<usize, usize>>,
+    pub _total_weight: f32,
 }
 
 impl<N, E> Default for Graph<N, E> {
