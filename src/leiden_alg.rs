@@ -1,16 +1,9 @@
 use hashbrown::HashMap;
 use hashbrown::HashSet;
-use rayon::iter::IntoParallelIterator;
-use rayon::iter::ParallelIterator;
 use std::collections::VecDeque;
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
 
 pub type CommunityId = u32;
 
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug)]
 pub struct Graph<N, E> {
     pub _nodes: Vec<N>,
     pub _edges: Vec<EdgeInfo<E>>,
@@ -24,16 +17,12 @@ impl<N, E> Default for Graph<N, E> {
     }
 }
 
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug)]
 pub struct EdgeInfo<E> {
     pub edge_data: E,
     pub weight: f32,
     pub _id: usize,
 }
 
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug)]
 pub enum Community {
     L1Community(HashSet<usize> /* nodes */),
     LNCommunity(Vec<Community> /* communities */),
@@ -59,18 +48,10 @@ impl Community {
 
 pub trait ModularityOptimizer {
     fn is_converged(&mut self, previous: f32, current: f32) -> bool;
-    fn get_parallel_threshold(&self) -> usize;
 }
 
 pub struct TrivialModularityOptimizer {
-    /// Parallel scale
-    ///
-    /// If the node count exceeds this value, the optimizer will use parallel
-    /// optimization.
-    pub parallel_scale: usize,
-
     /// Tolerance for modularity change
-    ///
     /// If the modularity change is less than this value, the optimizer will
     /// consider the optimization converged.
     pub tol: f32,
@@ -80,11 +61,6 @@ impl ModularityOptimizer for TrivialModularityOptimizer {
     #[inline]
     fn is_converged(&mut self, previous: f32, current: f32) -> bool {
         previous - current < self.tol
-    }
-
-    #[inline]
-    fn get_parallel_threshold(&self) -> usize {
-        self.parallel_scale
     }
 }
 
@@ -208,6 +184,7 @@ impl<N: Send + Sync, E: Send + Sync> Graph<N, E> {
         let node_count: usize = self.count_nodes();
         let mut q = 0.0;
 
+        // get assignment if changed by local move
         macro_rules! get_assignment {
             ($i:ident) => {
                 match local_move.get() {
@@ -271,80 +248,41 @@ impl<N: Send + Sync, E: Send + Sync> Graph<N, E> {
         assignments: &mut CommunityAssignments,
         optimizer: &mut impl ModularityOptimizer,
     ) {
+        // 
         let mut current_modularity = self.compute_modularity(assignments);
         let node_count = self.count_nodes();
-        let parallel_threshold = optimizer.get_parallel_threshold();
         let mut previous_modularity: f32;
-
-        if node_count < parallel_threshold {
-            let mut batch_moving: Vec<LocalMove> = Vec::new();
-
-            loop {
-                previous_modularity = current_modularity;
-
-                for i in 0..node_count {
-                    let node = i;
-                    if let Some(local_move) =
-                        self.fast_local_move(node, assignments, current_modularity)
-                    {
-                        batch_moving.push(local_move);
-                    }
-                }
-
-                if batch_moving.is_empty() {
-                    break;
-                } else {
-                    for local_move in batch_moving.iter() {
-                        assignments.insert(local_move.node, local_move.community);
-                    }
-                    batch_moving.clear();
-                }
-
-                current_modularity = self.compute_modularity(assignments);
-                if current_modularity == previous_modularity {
-                    // but batch_moving is not empty
-                    // in this case we randomly choose a node to move to avoid local minimal
-                    self._optimize_modularity_handle_pitfall(assignments, current_modularity);
-                }
-                if optimizer.is_converged(previous_modularity, current_modularity) {
-                    break;
+        let mut batch_moving: Vec<LocalMove> = Vec::new();
+        loop {
+            previous_modularity = current_modularity;
+            // goes through all the nodes :C
+            for i in 0..node_count {
+                let node = i;
+                if let Some(local_move) =
+                    self.fast_local_move(node, assignments, current_modularity)
+                {
+                    batch_moving.push(local_move);
                 }
             }
-        } else {
-            let mut batch_moving: boxcar::Vec<LocalMove> = boxcar::Vec::new();
 
-            loop {
-                previous_modularity = current_modularity;
-
-                (0..node_count).into_par_iter().for_each(|node| {
-                    if let Some(local_move) =
-                        self.fast_local_move(node, assignments, current_modularity)
-                    {
-                        batch_moving.push(local_move);
-                    }
-                });
-
-                if batch_moving.is_empty() {
-                    break;
-                } else {
-                    for (_, local_move) in batch_moving.iter() {
-                        assignments.insert(local_move.node, local_move.community);
-                    }
-
-                    batch_moving.clear();
+            if batch_moving.is_empty() {
+                break;
+            } else {
+                for local_move in batch_moving.iter() {
+                    assignments.insert(local_move.node, local_move.community);
                 }
+                batch_moving.clear();
+            }
 
-                current_modularity = self.compute_modularity(assignments);
-
-                if current_modularity == previous_modularity {
-                    // but batch_moving is not empty
-                    // in this case we randomly choose a node to move to avoid local minimal
-                    self._optimize_modularity_handle_pitfall(assignments, current_modularity);
-                }
-
-                if optimizer.is_converged(previous_modularity, current_modularity) {
-                    break;
-                }
+            current_modularity = self.compute_modularity(assignments);
+            if current_modularity == previous_modularity {
+                // but batch_moving is not empty
+                // in this case we randomly choose a node to move to avoid local minimal
+                println!("Batch moving not empty");
+                self._optimize_modularity_handle_pitfall(assignments, current_modularity);
+            }
+            if optimizer.is_converged(previous_modularity, current_modularity) {
+                break;
             }
         }
     }
@@ -486,23 +424,30 @@ impl<N: Send + Sync, E: Send + Sync> Graph<N, E> {
 
         communities_by_louvain
     }
-
+    // main function == to leiden function in pseduo code
     pub fn leiden(
         &self,
         max_iter: Option<usize>,
         optimizer: &mut impl ModularityOptimizer,
     ) -> Graph<Community, ()> {
         let mut high_level_graph: Graph<Community, ()>;
-        {
-            let g = leiden_l1(&self, optimizer);
-            let node_count_g1 = g.count_nodes();
-            let g = leiden_ln(g, optimizer);
-            let node_count_g2 = g.count_nodes();
-            if node_count_g2 == node_count_g1 {
-                return g;
-            }
-            high_level_graph = g;
+        // l1 leiden initialization phase where each node is its own community
+
+        println!("Starting nodes {}", self.count_nodes());
+        let g = leiden_l1(&self, optimizer);
+        // should be the number of nodes == num of communities
+        let node_count_g1 = g.count_nodes();
+        println!("high level community count  1 {}", node_count_g1);
+        let g = leiden_ln(g, optimizer);
+        let node_count_g2 = g.count_nodes();
+        println!("high level community count  2 {}", node_count_g2);
+        if node_count_g2 == node_count_g1 {
+            println!("return after one iteration");
+            return g;
         }
+        
+
+        high_level_graph = g;
 
         let mut count = high_level_graph.count_nodes();
         let mut previous: usize;
@@ -512,6 +457,7 @@ impl<N: Send + Sync, E: Send + Sync> Graph<N, E> {
                 previous = count;
                 high_level_graph = leiden_ln(high_level_graph, optimizer);
                 count = high_level_graph.count_nodes();
+                println!("high level node count {}", count);
                 if (previous == count) | (max_iter == 0) {
                     break;
                 }
@@ -538,7 +484,10 @@ fn leiden_l1<N: Send + Sync, E: Send + Sync>(
     optimizer: &mut impl ModularityOptimizer,
 ) -> Graph<Community, ()> {
     let mut community_assignments = graph.initial_community();
+    println!("initial community assignment {} {:?}", community_assignments.len(), community_assignments.keys());
+
     graph.optimize_modularity(&mut community_assignments, optimizer);
+
     let communities = graph.refine(&community_assignments);
     return compress_l1(graph, communities);
 }

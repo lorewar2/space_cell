@@ -18,7 +18,59 @@ const COUNT_DIFF_FOR_SIMILAR: usize = 500;
 //const CELL_CONNECT_DISTANCE: isize = 10_000; //use L2 and see // for 1000 median 14 // for 500 median 5
 
 fn main() {
-    //leiden_test();
+    leiden_test();
+    //make_connections_and_run_clustering();
+}
+
+fn leiden_test() {
+    let mut nodes: HashMap<&'static str, usize> = HashMap::new();
+    let mut g = Graph::new();
+    let edges: &[(&'static str, &'static str, f32)] = &[
+        ("Fortran", "C", 0.5),
+        ("Fortran", "LISP", 0.3),
+        ("Fortran", "MATLAB", 0.6),
+        ("C", "C++", 0.9),
+        ("C", "Go", 0.6),
+        ("LISP", "ML", 0.5),
+        ("LISP", "OCaml", 0.2),
+        ("LISP", "Haskell", 0.2),
+        ("LISP", "Ruby", 0.5),
+        ("LISP", "Julia", 0.6),
+        ("ML", "OCaml", 0.8),
+        ("ML", "Haskell", 0.5),
+        ("OCaml", "Haskell", 0.3),
+        ("OCaml", "F#", 0.6),
+        ("Haskell", "Julia", 0.2),
+        ("C++", "Python", 0.32),
+        ("C++", "Ruby", 0.2),
+        ("C++", "C#", 0.5),
+        ("Python", "F#", 0.2),
+        ("Python", "Julia", 0.4),
+        ("C#", "F#", 0.3),
+    ];
+    
+
+    for (from, to, weight) in edges.iter() {
+        let from_id = *nodes.entry(from).or_insert_with(|| g.add_node(from));
+        let to_id = *nodes.entry(to).or_insert_with(|| g.add_node(to));
+        g.add_edge(from_id, to_id, (), *weight);
+    }
+
+    println!("number of nodes in the initial graph: {}", g._nodes.len());
+
+    let mut optimizer = TrivialModularityOptimizer {tol: 1e-11};
+    let hierarchy = g.leiden(Some(10), &mut optimizer);
+
+    for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
+        println!("community {}:", i);
+        node.collect_nodes(&|i| {
+            let n = g.node_data_slice()[i];
+            println!("     {}", n);
+        });
+    }
+}
+
+fn make_connections_and_run_clustering() {
     // load the data
     let cell_data = data_loader_spatial();
     
@@ -57,7 +109,7 @@ fn leiden_run(similarities: Vec<(&CellData, &CellData, f32)>) {
     let mut id_to_label: HashMap<usize, String> = HashMap::new();  // integer → string
     let mut next_id = 0;
     for distance in similarities.iter() {
-    if distance.2 > (1.0 / 2_000.0) {
+    if distance.2 > (1.0 / 1_000.0) {
 
         let from_name = distance.0.cell_id.clone();
         let to_name   = distance.1.cell_id.clone();
@@ -86,12 +138,11 @@ fn leiden_run(similarities: Vec<(&CellData, &CellData, f32)>) {
 }
     println!("Graph done");
     let mut optimizer = TrivialModularityOptimizer {
-            parallel_scale: 32,
-            tol: 1e-11,
+            tol: 1e-11
     };
     println!("Start Clustering");
     //save graph and run in python for now
-    save_graphml(&g, &id_to_label, "languages.graphml");
+    save_graphml(&g, &id_to_label, "cere.graphml");
     // let hierarchy = g.leiden(Some(10), &mut optimizer);
     // println!("Clustering Done");
     // for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
@@ -149,51 +200,6 @@ fn save_graphml(g: &UnGraphMap<usize, f32>, id_to_label: &HashMap<usize, String>
 
     writeln!(file, "</graph>").unwrap();
     writeln!(file, "</graphml>").unwrap();
-}
-
-fn leiden_test() {
-    let mut nodes: HashMap<&'static str, usize> = HashMap::new();
-    let mut g = Graph::new();
-    let edges: &[(&'static str, &'static str, f32)] = &[
-        ("Fortran", "C", 0.5),
-        ("Fortran", "LISP", 0.3),
-        ("Fortran", "MATLAB", 0.6),
-        ("C", "C++", 0.9),
-        ("C", "Go", 0.6),
-        ("LISP", "ML", 0.5),
-        ("LISP", "OCaml", 0.2),
-        ("LISP", "Haskell", 0.2),
-        ("LISP", "Ruby", 0.5),
-        ("LISP", "Julia", 0.6),
-        ("ML", "OCaml", 0.8),
-        ("ML", "Haskell", 0.5),
-        ("OCaml", "Haskell", 0.3),
-        ("OCaml", "F#", 0.6),
-        ("Haskell", "Julia", 0.2),
-        ("C++", "Python", 0.32),
-        ("C++", "Ruby", 0.2),
-        ("C++", "C#", 0.5),
-        ("Python", "F#", 0.2),
-        ("Python", "Julia", 0.4),
-        ("C#", "F#", 0.3),
-    ];
-
-    for (from, to, weight) in edges.iter() {
-        let from_id = *nodes.entry(from).or_insert_with(|| g.add_node(from));
-        let to_id = *nodes.entry(to).or_insert_with(|| g.add_node(to));
-        g.add_edge(from_id, to_id, (), *weight);
-    }
-
-    let mut optimizer = TrivialModularityOptimizer {parallel_scale: 128, tol: 1e-11};
-    let hierarchy = g.leiden(Some(1), &mut optimizer);
-
-    for (i, node) in hierarchy.node_data_slice().iter().enumerate() {
-        println!("community {}:", i);
-        node.collect_nodes(&|i| {
-            let n = g.node_data_slice()[i];
-            println!("     {}", n);
-        });
-    }
 }
 
 fn make_the_graph(cell_data: &Vec<CellData>, similarities: Vec<(&CellData, &CellData, f64)>) {
