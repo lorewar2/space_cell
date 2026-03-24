@@ -39,11 +39,12 @@ fn distance_calculator_and_filter(cells: &mut Vec<CellData>) {
         let y = (cell.spatial_location.1 * 100.0) as isize;
         spatial_map.insert((x, y), cell);
     }
+    let mut all_values = vec![];
     // go through each cell and generate the close 100 cell list with distances
     for cell in &*cells {
         let x_main = (cell.spatial_location.0 * 100.0) as isize;
         let y_main = (cell.spatial_location.1 * 100.0) as isize;
-        let mut radius = 1; // check l1 distance for efficency
+        let mut radius = 1_000; // check l1 distance for efficency
         'radi_loop: loop {
             let mut temp_list: Vec<(usize, isize)> = vec![]; // id distance
             let x_main_radius = (x_main - radius, x_main + radius);
@@ -60,21 +61,29 @@ fn distance_calculator_and_filter(cells: &mut Vec<CellData>) {
                 }
                 let key_cell_id = spatial_map.get(&(*x_key, *y_key)).unwrap().cell_index;
                 // if reached here, should be within range in l1
-                println!("cell index {},  ({}, {}), close by withing l1 {} to cell index {} ({}, {})", cell.cell_index, x_main, y_main, radius, key_cell_id, x_key, y_key);
+                //println!("cell index {},  ({}, {}), close by withing l1 {} to cell index {} ({}, {})", cell.cell_index, x_main, y_main, radius, key_cell_id, x_key, y_key);
                 temp_list.push((key_cell_id, 0));
             }
             // loop until we find atleast 100 entries
+            println!("cell index {},  ({}, {}), radius {} number of cells {}", cell.cell_index, x_main, y_main, radius, temp_list.len());
+            // make sure doesnt go over either
             if temp_list.len() < 10 {
                 radius = radius * 10;
+            }
+            else if temp_list.len() < 50 {
+                radius = radius * 2;
             }
             else if temp_list.len() < 100 {
                 radius = radius + 10;
             }
             else {
+                all_values.push(temp_list.len());
                 break 'radi_loop;
             }
         }
-        
+        // check counts
+        all_values.sort_unstable();
+        println!("Max count {} Median {} Min {}", all_values[all_values.len() - 1], all_values[all_values.len() / 2], all_values[0]);
     }
 }
 
