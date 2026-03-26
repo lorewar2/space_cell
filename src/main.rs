@@ -20,16 +20,48 @@ fn main() {
 
 fn make_connections_and_run_clustering() {
     // load the data
-    let mut cell_data = data_loader_spatial();
+    let cell_data = data_loader_spatial();
     println!("Number of cells: {}", cell_data.len());
-    distance_calculator_and_filter(&mut cell_data);
+    let cell_close_by = find_close_cells_l1(&cell_data);
     // // find the similar cells (exact same if any)
-    // let (similarities, _map) = find_similar_close_by_cells(&cell_data);
+    let similarities = loss_distance_similarity_calculator(&cell_data, &cell_close_by);
+    //let (similarities, _map) = find_similar_close_by_cells(&cell_data);
     // // leiden run
-    // save_graph_for_leiden(similarities);
+    save_graph_for_leiden(similarities);
 }
 
-fn distance_calculator_and_filter(cells: &mut Vec<CellData>) {
+fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_by: &'a Vec<Vec<&'a CellData>>) -> Vec<(&'a CellData, &'a CellData, f32)> {
+    let distance_weight = 0.1;
+    let glm_simi_weight = 1.0;
+    let mut loss_between_cells: Vec<(&CellData, &CellData, f32)> = Vec::new();
+    for (origin_cell, close_cell_vec) in cells.iter().zip(cell_close_by) {
+        for close_cell in close_cell_vec {
+            if close_cell.cell_id == origin_cell.cell_id {
+                continue;
+            }
+            // calculate the distance between target and close cell
+            let (x_origin, y_origin) = origin_cell.spatial_location;
+            let (x_close, y_close) = close_cell.spatial_location;
+            let l2_distance = euclidean_distance(x_origin * 100.0, y_origin * 100.0, x_close * 100.0, y_close * 100.0);
+            // calculate the similarity between target and close cell
+            let glm_similarity = squared_error(&origin_cell.glm_data, &close_cell.glm_data);
+            // calculate the loss using distance and similarity
+            let loss = (distance_weight * l2_distance) + (glm_simi_weight * glm_similarity);
+            // inverse loss because leiden weights are high = well connected
+            let inverse_loss = 1_000_000.0 / loss;
+            println!("l2 distance {} glm dist {} loss {} inverse_loss {}", l2_distance, glm_similarity, loss, inverse_loss);
+            // append to loss between cells
+            loss_between_cells.push((origin_cell, close_cell, inverse_loss));
+        }
+    }
+    loss_between_cells
+}
+
+fn euclidean_distance(x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt()
+}
+
+fn find_close_cells_l1(cells: &Vec<CellData>) -> Vec<Vec<&CellData>> {
     // index hash map, match index to cell, and generate spatial map
     let mut index_cell_map: HashMap<usize, &CellData> = HashMap::new();
     let mut spatial_map: HashMap<(isize, isize), &CellData> = HashMap::new();
@@ -40,13 +72,15 @@ fn distance_calculator_and_filter(cells: &mut Vec<CellData>) {
         spatial_map.insert((x, y), cell);
     }
     let mut all_values = vec![];
+    let mut cell_closeby_cells = vec![];
     // go through each cell and generate the close 100 cell list with distances
     for cell in &*cells {
         let x_main = (cell.spatial_location.0 * 100.0) as isize;
         let y_main = (cell.spatial_location.1 * 100.0) as isize;
-        let mut radius = 1_000; // check l1 distance for efficency
+        let mut radius = 10_000; // check l1 distance for efficiency
+        let mut temp_list: Vec<&CellData>; // id distance
         'radi_loop: loop {
-            let mut temp_list: Vec<(usize, isize)> = vec![]; // id distance
+            temp_list = vec![];
             let x_main_radius = (x_main - radius, x_main + radius);
             let y_main_radius = (y_main - radius, y_main + radius);
             // go through all the locations
@@ -59,40 +93,30 @@ fn distance_calculator_and_filter(cells: &mut Vec<CellData>) {
                     // not within y range
                     continue;
                 }
-                let key_cell_id = spatial_map.get(&(*x_key, *y_key)).unwrap().cell_index;
+                let key_cell_id = spatial_map.get(&(*x_key, *y_key)).unwrap();
                 // if reached here, should be within range in l1
                 //println!("cell index {},  ({}, {}), close by withing l1 {} to cell index {} ({}, {})", cell.cell_index, x_main, y_main, radius, key_cell_id, x_key, y_key);
-                temp_list.push((key_cell_id, 0));
+                temp_list.push(*key_cell_id);
             }
             // loop until we find atleast 100 entries
             println!("cell index {},  ({}, {}), radius {} number of cells {}", cell.cell_index, x_main, y_main, radius, temp_list.len());
             // make sure doesnt go over either
             // under
-            if temp_list.len() < 10 {
-                radius = radius * 10;
-            }
-            else if temp_list.len() < 50 {
-                radius = radius * 2;
-            }
-            else if temp_list.len() < 100 {
-                radius = radius + 10;
-            }
-            // over
-            else if temp_list.len() > 1000 {
-                radius = radius / 3;
-            }
-            else if temp_list.len() > 300 {
-                radius = radius - 10;
+            if temp_list.len() < 100 {
+                radius = radius * 5 / 4;
             }
             else {
                 all_values.push(temp_list.len());
+                // found the required number of cells, save the cell keys
                 break 'radi_loop;
             }
         }
+        cell_closeby_cells.push(temp_list);
         // check counts
         all_values.sort_unstable();
         println!("Max count {} Median {} Min {}", all_values[all_values.len() - 1], all_values[all_values.len() / 2], all_values[0]);
     }
+    cell_closeby_cells
 }
 
 fn save_graph_for_leiden(similarities: Vec<(&CellData, &CellData, f32)>) {
