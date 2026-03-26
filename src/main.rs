@@ -67,6 +67,7 @@ fn distance_calculator_and_filter(cells: &mut Vec<CellData>) {
             // loop until we find atleast 100 entries
             println!("cell index {},  ({}, {}), radius {} number of cells {}", cell.cell_index, x_main, y_main, radius, temp_list.len());
             // make sure doesnt go over either
+            // under
             if temp_list.len() < 10 {
                 radius = radius * 10;
             }
@@ -75,6 +76,13 @@ fn distance_calculator_and_filter(cells: &mut Vec<CellData>) {
             }
             else if temp_list.len() < 100 {
                 radius = radius + 10;
+            }
+            // over
+            else if temp_list.len() > 1000 {
+                radius = radius / 3;
+            }
+            else if temp_list.len() > 300 {
+                radius = radius - 10;
             }
             else {
                 all_values.push(temp_list.len());
