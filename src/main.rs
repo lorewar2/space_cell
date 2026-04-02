@@ -25,7 +25,7 @@ fn make_connections_and_run_clustering() {
     let cell_close_by = find_close_cells_l1(&cell_data);
     // // find the similar cells (exact same if any)
     let similarities = loss_distance_similarity_calculator(&cell_data, &cell_close_by);
-    let (similarities, _map) = find_similar_close_by_cells(&cell_data);
+    //let (similarities, _map) = find_similar_close_by_cells(&cell_data);
     // // leiden run
     save_graph_for_leiden(similarities);
 }
@@ -54,7 +54,7 @@ fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_
             let inverse_loss = 1.0 / loss;
             println!("l2 distance {} glm dist {} raw_count {} loss {} inverse_loss {}", l2_distance, glm_similarity, count_difference, loss, inverse_loss);
             // dont use if not within threshold
-            if count_difference < 100.0 {
+            if count_difference < 15.0 && glm_similarity < 1_500.0 && l2_distance < 5_000.0 { // 20 1500 5000
                 // append to loss between cells
                 loss_between_cells.push((origin_cell, close_cell, inverse_loss));
             }
@@ -104,9 +104,16 @@ fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_
         *cluster_counts.entry(*cluster).or_insert(0) += 1;
     }
     // print results
+    let mut ignored_cells = 0;
     for (cluster, count) in &cluster_counts {
-        println!("Cluster {} has {} cells", cluster, count);
+        if count > &100 {
+            println!("Cluster {} has {} cells", cluster, count);
+        }
+        else {
+            ignored_cells += count;
+        }
     }
+    println!("ignored {}", ignored_cells);
     loss_between_cells
 }
 

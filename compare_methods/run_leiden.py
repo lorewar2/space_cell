@@ -23,7 +23,7 @@ def main():
         G,
         leidenalg.RBConfigurationVertexPartition,
         weights=weights,
-        resolution_parameter=0.01
+        resolution_parameter=0.1
     )
 
     other_map = {}
@@ -53,14 +53,14 @@ def main():
         for node_index in community:
             leiden_map[str(node_labels[node_index])] = comm_id
 
-    top10 = sorted(community_sizes.items(), key=lambda x: x[1], reverse=True)[:10]
+    top10 = sorted(community_sizes.items(), key=lambda x: x[1], reverse=True)[:20]
     top10_ids = {cid for cid, _ in top10}
 
     print("\nTop 10 largest communities:")
     for cid, size in top10:
         print(f"Community {cid}: {size} nodes")
 
-    with open("leiden_cosmx.csv", "w", newline="") as f:
+    with open("leiden_cere.csv", "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["cell_name", "community_id", "x", "y"])
 
