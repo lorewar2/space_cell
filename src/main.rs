@@ -31,9 +31,9 @@ fn make_connections_and_run_clustering() {
 }
 
 fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_by: &'a Vec<Vec<&'a CellData>>) -> Vec<(&'a CellData, &'a CellData, f32)> {
-    let distance_weight = 1.0;
+    let distance_weight = 0.0;
     let glm_simi_weight = 1.0;
-    let raw_count_weight = 100.0;
+    let raw_count_weight = 0.0;
     let mut loss_between_cells: Vec<(&CellData, &CellData, f32)> = Vec::new();
     for (origin_cell, close_cell_vec) in cells.iter().zip(cell_close_by) {
         for close_cell in close_cell_vec {
@@ -54,11 +54,58 @@ fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_
             let inverse_loss = 1.0 / loss;
             println!("l2 distance {} glm dist {} raw_count {} loss {} inverse_loss {}", l2_distance, glm_similarity, count_difference, loss, inverse_loss);
             // dont use if not within threshold
-            if count_difference < 200.0 {
+            if count_difference < 100.0 {
                 // append to loss between cells
                 loss_between_cells.push((origin_cell, close_cell, inverse_loss));
             }
         }
+    }
+    // stuff for analysis
+    println!("Connections {}", loss_between_cells.len());
+    let mut cell_to_cluster: HashMap<usize, usize> = HashMap::new();
+    let mut cluster_num = 0;
+    for arr in &loss_between_cells {
+        let a = arr.0.cell_index;
+        let b = arr.1.cell_index;
+        let a_cluster = cell_to_cluster.get(&a).copied();
+        let b_cluster = cell_to_cluster.get(&b).copied();
+        match (a_cluster, b_cluster) {
+            // both in clusters
+            (Some(c1), Some(c2)) => {
+                if c1 != c2 {
+                    // merge c2 into c1
+                    for val in cell_to_cluster.values_mut() {
+                        if *val == c2 {
+                            *val = c1;
+                        }
+                    }
+                }
+            }
+            // none in clusters
+            (None, None) => {
+                cell_to_cluster.insert(a, cluster_num);
+                cell_to_cluster.insert(b, cluster_num);
+                cluster_num += 1;
+            }
+            // a in cluster, b not
+            (Some(c), None) => {
+                cell_to_cluster.insert(b, c);
+            }
+            // b in cluster, a not
+            (None, Some(c)) => {
+                cell_to_cluster.insert(a, c);
+            }
+        }
+    }
+    
+    // cluster_id -> count
+    let mut cluster_counts: HashMap<usize, usize> = HashMap::new();
+    for cluster in cell_to_cluster.values() {
+        *cluster_counts.entry(*cluster).or_insert(0) += 1;
+    }
+    // print results
+    for (cluster, count) in &cluster_counts {
+        println!("Cluster {} has {} cells", cluster, count);
     }
     loss_between_cells
 }

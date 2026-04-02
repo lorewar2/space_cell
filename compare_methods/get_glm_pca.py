@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from glmpca import glmpca
 import sys
+from sklearn.cluster import KMeans
 
 def main():
     if len(sys.argv) < 2:
@@ -53,12 +54,12 @@ def glm_pca(output_file_path, penalty):
 
 def show_plot():
     # load data
-    glm_df = pd.read_csv("./data/glm_pca_data.csv")
+    glm_df = pd.read_csv("./data/cerebellum_glm.csv")
     glm_df.set_index("cell_id", inplace=True)
 
     A = glm_df.to_numpy()  # (N_cells, num_PCs)
 
-    spatial_df = pd.read_csv("./data/spatial_metadata.csv", usecols=[0, 35, 36])
+    spatial_df = pd.read_csv("./data/cerebellum_coor.csv", usecols=[0, 1, 2]) # 0, 35, 36
     print(spatial_df)
     spatial_df = spatial_df.rename(columns={spatial_df.columns[0]: "cell_id"})
     spatial_df.set_index("cell_id", inplace=True)
@@ -70,6 +71,18 @@ def show_plot():
 
     coords_mat = spatial_df.to_numpy()
     A = glm_df.to_numpy()
+    # cluster using kmeans to test
+
+    n_clusters=4 # CHANGE to number of experts
+    kmeans=KMeans(n_clusters=4)
+    kmeans.fit(A)
+    kmeans_labels=kmeans.labels_
+    fig,ax=plt.subplots(figsize=(5,5))
+    for t in np.unique(kmeans_labels):
+        plt.scatter(coords_mat[kmeans_labels==t,0],coords_mat[kmeans_labels==t,1],s=2)
+    plt.axis('off')
+    plt.show()
+
     # plot
     R = 2
     C = 4
@@ -94,5 +107,5 @@ def show_plot():
     return
 
 if __name__ == '__main__':
-    #show_plot()
-    main()
+    show_plot()
+    #main()
