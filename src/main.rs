@@ -25,46 +25,19 @@ fn make_connections_and_run_clustering() {
     let cell_close_by = find_close_cells_l1(&cell_data);
     // // find the similar cells (exact same if any)
     let similarities = loss_distance_similarity_calculator(&cell_data, &cell_close_by);
+
+    // better graph
+    merge_similar_cells_connect_merged_with_loss(similarities, &cell_data);
     //let (similarities, _map) = find_similar_close_by_cells(&cell_data);
     // // leiden run
-    save_graph_for_leiden(similarities);
+    //save_graph_for_leiden(similarities);
 }
-
-fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_by: &'a Vec<Vec<&'a CellData>>) -> Vec<(&'a CellData, &'a CellData, f32)> {
-    let distance_weight = 0.0;
-    let glm_simi_weight = 1.0;
-    let raw_count_weight = 0.0;
-    let mut loss_between_cells: Vec<(&CellData, &CellData, f32)> = Vec::new();
-    for (origin_cell, close_cell_vec) in cells.iter().zip(cell_close_by) {
-        for close_cell in close_cell_vec {
-            if close_cell.cell_id == origin_cell.cell_id {
-                continue;
-            }
-            // calculate the distance between target and close cell
-            let (x_origin, y_origin) = origin_cell.spatial_location;
-            let (x_close, y_close) = close_cell.spatial_location;
-            let l2_distance = euclidean_distance(x_origin * 100.0, y_origin * 100.0, x_close * 100.0, y_close * 100.0);
-            // calculate the raw count similarity
-            let count_difference =  origin_cell.total_count.abs_diff(close_cell.total_count) as f32;
-            // calculate the similarity between target and close cell
-            let glm_similarity = squared_error(&origin_cell.glm_data, &close_cell.glm_data);
-            // calculate the loss using distance and similarity
-            let loss = (distance_weight * l2_distance) + (glm_simi_weight * glm_similarity) + (count_difference * raw_count_weight);
-            // inverse loss because leiden weights are high = well connected
-            let inverse_loss = 1.0 / loss;
-            println!("l2 distance {} glm dist {} raw_count {} loss {} inverse_loss {}", l2_distance, glm_similarity, count_difference, loss, inverse_loss);
-            // dont use if not within threshold
-            if count_difference < 15.0 && glm_similarity < 1_500.0 && l2_distance < 5_000.0 { // 20 1500 5000
-                // append to loss between cells
-                loss_between_cells.push((origin_cell, close_cell, inverse_loss));
-            }
-        }
-    }
-    // stuff for analysis
-    println!("Connections {}", loss_between_cells.len());
+fn merge_similar_cells_connect_merged_with_loss(similarities: Vec<(&CellData, &CellData, f32)>, cells: &Vec<CellData>) {
+    // union join on the previous connection to get the similar blocks
+    println!("Connections {}", similarities.len());
     let mut cell_to_cluster: HashMap<usize, usize> = HashMap::new();
     let mut cluster_num = 0;
-    for arr in &loss_between_cells {
+    for arr in &similarities {
         let a = arr.0.cell_index;
         let b = arr.1.cell_index;
         let a_cluster = cell_to_cluster.get(&a).copied();
@@ -106,7 +79,7 @@ fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_
     // print results
     let mut ignored_cells = 0;
     for (cluster, count) in &cluster_counts {
-        if count > &100 {
+        if count > &50 {
             println!("Cluster {} has {} cells", cluster, count);
         }
         else {
@@ -114,6 +87,51 @@ fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_
         }
     }
     println!("ignored {}", ignored_cells);
+    // make the cluster vec
+    //let big_cell_clusters = vec![];
+    for entry in cell_to_cluster {
+
+    }
+    // calculate the average
+    // location average
+
+    // glm pca average
+
+    // make new cells with average location and pca 
+
+    // return
+}
+
+fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_by: &'a Vec<Vec<&'a CellData>>) -> Vec<(&'a CellData, &'a CellData, f32)> {
+    let distance_weight = 0.0;
+    let glm_simi_weight = 1.0;
+    let raw_count_weight = 0.0;
+    let mut loss_between_cells: Vec<(&CellData, &CellData, f32)> = Vec::new();
+    for (origin_cell, close_cell_vec) in cells.iter().zip(cell_close_by) {
+        for close_cell in close_cell_vec {
+            if close_cell.cell_id == origin_cell.cell_id {
+                continue;
+            }
+            // calculate the distance between target and close cell
+            let (x_origin, y_origin) = origin_cell.spatial_location;
+            let (x_close, y_close) = close_cell.spatial_location;
+            let l2_distance = euclidean_distance(x_origin * 100.0, y_origin * 100.0, x_close * 100.0, y_close * 100.0);
+            // calculate the raw count similarity
+            let count_difference =  origin_cell.total_count.abs_diff(close_cell.total_count) as f32;
+            // calculate the similarity between target and close cell
+            let glm_similarity = squared_error(&origin_cell.glm_data, &close_cell.glm_data);
+            // calculate the loss using distance and similarity
+            let loss = (distance_weight * l2_distance) + (glm_simi_weight * glm_similarity) + (count_difference * raw_count_weight);
+            // inverse loss because leiden weights are high = well connected
+            let inverse_loss = 1.0 / loss;
+            println!("l2 distance {} glm dist {} raw_count {} loss {} inverse_loss {}", l2_distance, glm_similarity, count_difference, loss, inverse_loss);
+            // dont use if not within threshold
+            if count_difference < 15.0 && glm_similarity < 1_100.0 && l2_distance < 5_000.0 { // 20 1500 5000
+                // append to loss between cells
+                loss_between_cells.push((origin_cell, close_cell, inverse_loss));
+            }
+        }
+    }
     loss_between_cells
 }
 
