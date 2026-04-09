@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::io::Write;
 use std::collections::HashMap;
+use std::cmp::Reverse;
 use petgraph::graphmap::UnGraphMap;
 use leiden_alg::{Graph, TrivialModularityOptimizer};
 
@@ -72,33 +73,41 @@ fn merge_similar_cells_connect_merged_with_loss(similarities: Vec<(&CellData, &C
     }
     
     // cluster_id -> count
-    let mut cluster_counts: HashMap<usize, usize> = HashMap::new();
-    for cluster in cell_to_cluster.values() {
-        *cluster_counts.entry(*cluster).or_insert(0) += 1;
+    // cell_id to hashmap
+    let mut cluster_cells = vec![vec![]; similarities.len()];
+    let mut cell_index_to_cell: HashMap<usize, &CellData> = HashMap::new();
+    for cell in cells {
+        cell_index_to_cell.insert(cell.cell_index, &cell);
     }
+    for (cell_index, cluster) in cell_to_cluster.iter() {
+        cluster_cells[*cluster].push(cell_index_to_cell[cell_index]);
+    }
+    // sort the cluster cells by size of each cluster
+    cluster_cells.sort_by_key(|inner_vec| Reverse(inner_vec.len()));
+    // only use the best 50 clusters
+    cluster_cells.truncate(50);
     // print results
     let mut ignored_cells = 0;
-    for (cluster, count) in &cluster_counts {
-        if count > &50 {
-            println!("Cluster {} has {} cells", cluster, count);
+    for (index, cluster) in cluster_cells.iter().enumerate() {
+        if cluster.len() > 50 {
+            println!("Cluster {} has {} cells", index, cluster.len());
         }
         else {
-            ignored_cells += count;
+            ignored_cells += cluster.len();
         }
     }
     println!("ignored {}", ignored_cells);
-    // make the cluster vec
-    //let big_cell_clusters = vec![];
-    for entry in cell_to_cluster {
-
-    }
     // calculate the average
-    // location average
+    // make a new cell for the whole cluster
 
-    // glm pca average
+    // get location average
 
-    // make new cells with average location and pca 
+    // get glm pca average
 
+    // get count average
+
+    // connect the merged cells with each other using glm pca distance and count loss
+    
     // return
 }
 
