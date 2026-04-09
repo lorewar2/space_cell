@@ -23,7 +23,7 @@ def main():
         G,
         leidenalg.RBConfigurationVertexPartition,
         weights=weights,
-        resolution_parameter=0.0000000001
+        resolution_parameter=1.0
     )
 
     other_map = {}
