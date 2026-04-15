@@ -1,5 +1,6 @@
 mod leiden_alg;
 
+use std::cell;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::io::Write;
@@ -28,12 +29,31 @@ fn make_connections_and_run_clustering() {
     let similarities = loss_distance_similarity_calculator(&cell_data, &cell_close_by);
 
     // better graph
-    merge_similar_cells_connect_merged_with_loss(similarities, &cell_data);
+    let new_cells = merge_similar_cells_connect_merged_with_loss(similarities, &cell_data);
+
+    // connect merged
+    let similarities = merged_connection(&new_cells);
     //let (similarities, _map) = find_similar_close_by_cells(&cell_data);
     // // leiden run
-    //save_graph_for_leiden(similarities);
+    save_graph_for_leiden(similarities);
 }
-fn merge_similar_cells_connect_merged_with_loss(similarities: Vec<(&CellData, &CellData, f32)>, cells: &Vec<CellData>) {
+
+fn merged_connection<'a>(cells: &'a Vec<CellData>) -> Vec<(&'a CellData, &'a CellData, f32)> {
+    let mut gene_distances = vec![];
+    // first try with glm pca loss
+    for i in 0..cells.len() {
+        let cell_a = &cells[i];
+        for j in (i + 1)..cells.len() {
+            let cell_b = &cells[j];
+            let mse = squared_error(&cell_a.glm_data, &cell_b.glm_data);
+            gene_distances.push((cell_a, cell_b, (1.0 / mse)));
+        }
+    }
+    println!("new connections {}", gene_distances.len());
+    gene_distances
+}
+
+fn merge_similar_cells_connect_merged_with_loss(similarities: Vec<(&CellData, &CellData, f32)>, cells: &Vec<CellData>) -> Vec<CellData> {
     // union join on the previous connection to get the similar blocks
     println!("Connections {}", similarities.len());
     let mut cell_to_cluster: HashMap<usize, usize> = HashMap::new();
@@ -98,17 +118,51 @@ fn merge_similar_cells_connect_merged_with_loss(similarities: Vec<(&CellData, &C
     }
     println!("ignored {}", ignored_cells);
     // calculate the average
+    let mut new_cell_vec = vec![];
     // make a new cell for the whole cluster
+    for (clus_index, cluster) in cluster_cells.iter().enumerate() {
+        let number_of_cells_in_cluster = cluster.len();
+        let mut x_location_total = 0.0;
+        let mut y_location_total = 0.0;
+        let mut count_total_vec = vec![];
+        let mut glm_pca_total_vec = vec![];
+        
+        for cell in cluster {
+            // initialize the vectors
+            if count_total_vec.len() == 0 {
+                count_total_vec = vec![0; cell.read_counts.len()];
+            }
+            if glm_pca_total_vec.len() == 0 {
+                glm_pca_total_vec = vec![0.0; cell.glm_data.len()];
+            }
+            // get count 
+            for (index, read) in cell.read_counts.iter().enumerate() {
+                count_total_vec[index] += read;
+            }
+            // get glm pca 
+            for (index, glm) in cell.glm_data.iter().enumerate() {
+                glm_pca_total_vec[index] += glm;
+            }
+            // get location 
+            x_location_total += cell.spatial_location.0;
+            y_location_total += cell.spatial_location.1;
+        }
+        // get average and initialize a cell
+        for value in &mut count_total_vec {
+            *value = *value / (number_of_cells_in_cluster as u32);
+        }
+        for value in &mut glm_pca_total_vec {
+            *value = *value / (number_of_cells_in_cluster as f32);
+        }
+        x_location_total = x_location_total / number_of_cells_in_cluster as f32;
+        y_location_total = y_location_total / number_of_cells_in_cluster as f32;
 
-    // get location average
-
-    // get glm pca average
-
-    // get count average
-
-    // connect the merged cells with each other using glm pca distance and count loss
-    
-    // return
+        let new_cell = CellData::new(clus_index, clus_index.to_string(), (x_location_total, y_location_total), glm_pca_total_vec);
+        println!("{},{}", x_location_total, y_location_total);
+        new_cell_vec.push(new_cell);
+    }
+    println!("len of new cell vec {}", new_cell_vec.len());
+    return new_cell_vec;
 }
 
 fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_by: &'a Vec<Vec<&'a CellData>>) -> Vec<(&'a CellData, &'a CellData, f32)> {
