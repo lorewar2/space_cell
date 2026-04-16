@@ -23,13 +23,13 @@ def main():
         G,
         leidenalg.RBConfigurationVertexPartition,
         weights=weights,
-        resolution_parameter=1.0
+        resolution_parameter=0.1
     )
 
     other_map = {}
     coords_map = {}
 
-    with open("cellcharter_cere.csv", newline="") as f:
+    with open("visium_cellcharter.csv", newline="") as f:
         reader = csv.reader(f)
         header = next(reader, None)
         for row in reader:

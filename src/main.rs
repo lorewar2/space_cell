@@ -9,10 +9,10 @@ use std::cmp::Reverse;
 use petgraph::graphmap::UnGraphMap;
 use leiden_alg::{Graph, TrivialModularityOptimizer};
 
-const COUNT_FILE: &'static str = "./data/cerebellum_count.csv";
-const COOR_FILE: &'static str = "./data/cerebellum_coor.csv";
-const GLM_FILE: &'static str = "./data/cerebellum_glm.csv";
-const GENE_CELL_CUTOFF: usize = 3000;
+const COUNT_FILE: &'static str = "./data/visium_count.csv";
+const COOR_FILE: &'static str = "./data/visium_coor.csv";
+const GLM_FILE: &'static str = "./data/visium_glm.csv";
+const GENE_CELL_CUTOFF: usize = 2000;
 const COUNT_DIFF_FOR_SIMILAR: usize = 500;
 
 fn main() {
@@ -29,10 +29,10 @@ fn make_connections_and_run_clustering() {
     let similarities = loss_distance_similarity_calculator(&cell_data, &cell_close_by);
 
     // better graph
-    let new_cells = merge_similar_cells_connect_merged_with_loss(similarities, &cell_data);
+    //let new_cells = merge_similar_cells_connect_merged_with_loss(similarities, &cell_data);
 
     // connect merged
-    let similarities = merged_connection(&new_cells);
+   // let similarities = merged_connection(&new_cells);
     //let (similarities, _map) = find_similar_close_by_cells(&cell_data);
     // // leiden run
     save_graph_for_leiden(similarities);
@@ -108,15 +108,17 @@ fn merge_similar_cells_connect_merged_with_loss(similarities: Vec<(&CellData, &C
     cluster_cells.truncate(50);
     // print results
     let mut ignored_cells = 0;
+    let mut assigned_cells = 0;
     for (index, cluster) in cluster_cells.iter().enumerate() {
-        if cluster.len() > 50 {
+        if cluster.len() > 10 {
             println!("Cluster {} has {} cells", index, cluster.len());
+            assigned_cells += cluster.len();
         }
         else {
             ignored_cells += cluster.len();
         }
     }
-    println!("ignored {}", ignored_cells);
+    println!("unassigned {} assigned {} ignored {} total {}", cells.len() - assigned_cells, assigned_cells, ignored_cells, cells.len());
     // calculate the average
     let mut new_cell_vec = vec![];
     // make a new cell for the whole cluster
@@ -158,7 +160,7 @@ fn merge_similar_cells_connect_merged_with_loss(similarities: Vec<(&CellData, &C
         y_location_total = y_location_total / number_of_cells_in_cluster as f32;
 
         let new_cell = CellData::new(clus_index, clus_index.to_string(), (x_location_total, y_location_total), glm_pca_total_vec);
-        println!("{},{}", x_location_total, y_location_total);
+        //println!("{},{}", x_location_total, y_location_total);
         new_cell_vec.push(new_cell);
     }
     println!("len of new cell vec {}", new_cell_vec.len());
@@ -189,7 +191,7 @@ fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_
             let inverse_loss = 1.0 / loss;
             println!("l2 distance {} glm dist {} raw_count {} loss {} inverse_loss {}", l2_distance, glm_similarity, count_difference, loss, inverse_loss);
             // dont use if not within threshold
-            if count_difference < 15.0 && glm_similarity < 1_100.0 && l2_distance < 5_000.0 { // 20 1500 5000
+            if count_difference < 300.0 && glm_similarity < 2_100.0 && l2_distance < 30_000.0 { // 20 1500 5000
                 // append to loss between cells
                 loss_between_cells.push((origin_cell, close_cell, inverse_loss));
             }
@@ -406,8 +408,8 @@ fn data_loader_spatial() -> Vec<CellData> {
     let mut spatial_lookup: HashMap<String, (f32, f32)> = HashMap::new();
     let meta_file = File::open(COOR_FILE).expect("cannot open data file");
     let meta_data_reader = BufReader::new(meta_file);
-    let mut x_loc = 0;
-    let mut y_loc = 0;
+    let mut x_loc = 4;
+    let mut y_loc = 5;
     for (line_index, line) in meta_data_reader.lines().enumerate() {
         let line = line.unwrap();
         let values: Vec<&str> = line.split(',').collect();
@@ -437,7 +439,8 @@ fn data_loader_spatial() -> Vec<CellData> {
         let mut pca_values = vec![];
         let mut cell_id = "".to_string();
         for (value_index, value) in values.iter().enumerate() {
-            if value_index == 0 {
+            println!("{} {}", value_index, value);
+            if value_index == 0 || value_index == 1 { // change this to match the dataset
                 cell_id = value.to_string();
             }
             else {
@@ -479,11 +482,12 @@ fn data_loader_spatial() -> Vec<CellData> {
         // only use the genes which are expressed by num of cells greater than GENE_CELL_CUTOFF
         for (_cell_index, value) in values.iter().enumerate().skip(1) {
             // convert to u32 and add to cell data
-            let read_count = match value.to_string().parse::<u32>() {
-                Ok(x) => {x}
+            let read_count = match value.to_string().parse::<f32>() {
+                Ok(x) => {x as u32}
                 Err(_) => {continue}
             };
             if read_count > 0 {
+                
                 gene_expressed_by_cells += 1;
             }
         }
@@ -495,7 +499,7 @@ fn data_loader_spatial() -> Vec<CellData> {
                     continue;
                 }
                 // convert to u32 and add to cell data
-                let read_count = value.to_string().parse::<u32>().unwrap();
+                let read_count = value.to_string().parse::<f32>().unwrap() as u32;
                 all_cell_data[real_cell_index].read_counts.push(read_count);
                 all_cell_data[real_cell_index].total_count += read_count as usize;
                 if read_count > 0 {
