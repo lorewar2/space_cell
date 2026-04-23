@@ -191,12 +191,13 @@ fn loss_distance_similarity_calculator<'a>(cells: &'a Vec<CellData>, cell_close_
             let inverse_loss = 1.0 / loss;
             println!("l2 distance {} glm dist {} raw_count {} loss {} inverse_loss {}", l2_distance, glm_similarity, count_difference, loss, inverse_loss);
             // dont use if not within threshold
-            if count_difference < 300.0 && glm_similarity < 2_100.0 && l2_distance < 30_000.0 { // 20 1500 5000
+            if count_difference < 10_000.0 && glm_similarity < 50.0 && l2_distance < 15_000.0 { // 20 1500 5000
                 // append to loss between cells
                 loss_between_cells.push((origin_cell, close_cell, inverse_loss));
             }
         }
     }
+    println!("number of connections {}", loss_between_cells.len());
     loss_between_cells
 }
 
