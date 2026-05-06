@@ -11,6 +11,7 @@ import matplotlib.cm as cm
 import igraph as ig
 import leidenalg
 from matplotlib.colors import Normalize
+from scipy.special import gammaln 
 
 def main():
     data = load_data()
@@ -81,18 +82,18 @@ def minimal_test(border_barcodes, cell_clumps, data, color_by="ground_truth",
 
     def poisson_distance(bc, avg1, avg2):
         """
-        Poisson deviance: 2 * sum( mu - y + y * log(y / mu) )
-        where mu = clump mean counts (genes,), y = cell counts (genes,)
+        Negative Poisson log-likelihood:
+        NLL = -sum( y * log(mu) - mu - log(y!) )
+        Lower NLL = cell is more likely to come from that clump's distribution.
         """
-        eps    = 1e-8
-        y      = counts.loc[bc].values.astype(float)    # row = one cell, shape (genes,)
+        eps = 1e-8
+        y   = counts.loc[bc].values.astype(float)
 
-        def deviance(mu, y):
-            mu     = np.maximum(mu, eps)
-            y_safe = np.where(y > 0, y, eps)
-            return 2.0 * float(np.sum(mu - y + y * np.log(y_safe / mu)))
+        def nll(mu, y):
+            mu = np.maximum(mu, eps)
+            return float(np.sum(mu - y * np.log(mu) + gammaln(y + 1)))
 
-        return deviance(avg1, y), deviance(avg2, y)
+        return nll(avg1, y), nll(avg2, y)
 
     # ── 3. compute clump averages depending on method ────────────────────
     if method == "glm_pca":
