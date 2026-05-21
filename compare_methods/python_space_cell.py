@@ -16,20 +16,36 @@ from scipy.special import gammaln
 def main():
     data = load_data()
     #fig, axes = glm_pca_map(data)
-    border_barcodes = border_finder(data)
-    selected_cells = middle_cells_in_cluster(data)
+    all_cell_per_cluster = find_cells_in_cluster(data)
+    print(all_cell_per_cluster.keys())
+    print(len(all_cell_per_cluster["Layer 1"]))
+    print(len(all_cell_per_cluster["Layer 2"]))
+    print(len(all_cell_per_cluster["Layer 3"]))
+    print(len(all_cell_per_cluster["Layer 4"]))
+    print(len(all_cell_per_cluster["Layer 5"]))
+    print(len(all_cell_per_cluster["Layer 6"]))
+    print(len(all_cell_per_cluster["WM"]))
+    #border_barcodes = border_finder(data)
+    #selected_cells = middle_cells_in_cluster(data)
     #border_cell_assignment(data, selected_cells, border_barcodes, plot=True)
-    minimal_test(border_barcodes, selected_cells, data)
+    #minimal_test(border_barcodes, selected_cells, data)
     return
 
-def main():
-    data = load_data()
-    #fig, axes = glm_pca_map(data)
-    border_barcodes = border_finder(data)
-    selected_cells = middle_cells_in_cluster(data)
-    #border_cell_assignment(data, selected_cells, border_barcodes, plot=True)
-    minimal_test(border_barcodes, selected_cells, data)
-    return
+def find_cells_in_cluster(data):
+    # load data
+    spatial  = data["spatial"]
+    labels   = data["labels"]
+    clusters = sorted(labels.unique())
+
+    coords   = spatial[["x", "y"]].values
+    barcodes = spatial.index.values
+
+    # separate the cells to clusters
+    cluster_barcodes = {cl: [] for cl in clusters}
+    for i, bc in enumerate(barcodes):
+        own_cluster        = labels[bc]
+        cluster_barcodes[own_cluster].append(bc)
+    return cluster_barcodes
 
 def minimal_test(border_barcodes, cell_clumps, data, color_by="ground_truth",
                  distance_threshold=500.0, method="poisson"):
