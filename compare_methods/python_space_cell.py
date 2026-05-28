@@ -56,13 +56,25 @@ def plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_clus
         for bc in mixed_barcodes:
             dist_l1, dist_l2 = glm_pca_distance(bc, first_cluster_avg_glm, second_cluster_avg_glm, glm_pca)
             records.append({"barcode": bc, "dist_layer1": dist_l1, "dist_layer2": dist_l2})
-        dist_df = pd.DataFrame(records).set_index("barcode")
+        dist_df_glm = pd.DataFrame(records).set_index("barcode")
         # calculate pca loss
-
+        records = []
+        for bc in mixed_barcodes:
+            dist_l1, dist_l2 = glm_pca_distance(bc, first_cluster_avg_pca, second_cluster_avg_pca, pca)
+            records.append({"barcode": bc, "dist_layer1": dist_l1, "dist_layer2": dist_l2})
+        dist_df_pca = pd.DataFrame(records).set_index("barcode")
         # calculate poisson loss
-
+        records = []
+        for bc in mixed_barcodes:
+            dist_l1, dist_l2 = poisson_distance(bc, first_cluster_avg_counts, second_cluster_avg_counts, counts)
+            records.append({"barcode": bc, "dist_layer1": dist_l1, "dist_layer2": dist_l2})
+        dist_df_poisson = pd.DataFrame(records).set_index("barcode")
         # calculcate negative binomial loss
-
+        records = []
+        for bc in mixed_barcodes:
+            dist_l1, dist_l2 = negative_binomial_distance(bc, first_cluster_avg_counts, second_cluster_avg_counts, counts)
+            records.append({"barcode": bc, "dist_layer1": dist_l1, "dist_layer2": dist_l2})
+        dist_df_negbi = pd.DataFrame(records).set_index("barcode")
 
         # Plot glm pca
         unique_vals    = sorted(labels.unique())
@@ -93,15 +105,17 @@ def plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_clus
         axes[0].set_xlabel("x"); axes[0].set_ylabel("y")
         axes[0].set_aspect("equal")
 
-        d1 = dist_df.loc[mixed_barcodes, "dist_layer1"].values
-        d2 = dist_df.loc[mixed_barcodes, "dist_layer2"].values
-        axes[1].scatter(d1, d2, c=bc_colors, s=25, alpha=0.85,
+        d1 = dist_df_poisson.loc[mixed_barcodes, "dist_layer1"].values
+        d2 = dist_df_poisson.loc[mixed_barcodes, "dist_layer2"].values
+        axes[1].scatter(d1, d2, c=bc_colors, s=15, alpha=0.55,
                         linewidths=0.3, edgecolors="white")
         axes[1].axline((0, 0), slope=1, color="grey", linewidth=0.8,
                     linestyle="--", label="equal distance")
-        axes[1].set_xlabel("loss", fontsize=9)
-        axes[1].set_ylabel("loss", fontsize=9)
-        axes[1].set_title(f"Loss to clump avg — {color_title}\n(method: glmpca)", fontsize=11)
+        axes[1].set_xlabel("loss to cc1 avg", fontsize=9)
+        axes[1].set_ylabel("loss to cc2 avg", fontsize=9)
+        axes[1].set_title(f"Loss to cluster center avg — {color_title}\n(method)", fontsize=11)
+        #axes[1].set_xlim(0, 100)
+        #axes[1].set_ylim(0, 100)
 
         axes[1].legend(handles=legend_handles + [
             mpatches.Patch(color="grey", label="Equal distance")], fontsize=7)
@@ -130,6 +144,43 @@ def poisson_distance(bc, avg1, avg2, counts):
         return float(np.sum(mu - y * np.log(mu) + gammaln(y + 1)))
 
     return nll(avg1, y), nll(avg2, y)
+
+def negative_binomial_distance(bc, avg1, avg2, counts, theta=10.0):
+    """
+    Negative Binomial negative log-likelihood (NB2 parameterization)
+
+    Var(Y) = mu + mu^2 / theta
+
+    Parameters
+    ----------
+    bc : barcode/index
+    avg1, avg2 : mean expression vectors
+    counts : dataframe of counts
+    theta : dispersion parameter
+        Larger theta -> approaches Poisson
+
+    Returns
+    -------
+    nll(avg1), nll(avg2)
+    """
+    eps = 1e-8
+    y   = counts.loc[bc].values.astype(float)
+
+    def nll(mu, y, theta):
+        mu = np.maximum(mu, eps)
+
+        # NB log-likelihood
+        ll = (
+            gammaln(y + theta)
+            - gammaln(theta)
+            - gammaln(y + 1)
+            + theta * np.log(theta / (theta + mu))
+            + y * np.log(mu / (theta + mu))
+        )
+
+        return float(-np.sum(ll))
+
+    return nll(avg1, y, theta), nll(avg2, y, theta)
 
 def initialize_cluster_centers(data, all_cell_per_cluster):
     keys = all_cell_per_cluster.keys()
@@ -178,199 +229,6 @@ def find_cells_in_cluster(data):
         own_cluster        = labels[bc]
         cluster_barcodes[own_cluster].append(bc)
     return cluster_barcodes
-
-def minimal_test(border_barcodes, cell_clumps, data, color_by="ground_truth",
-                 distance_threshold=500.0, method="poisson"):
-    """
-    Parameters
-    ----------
-    color_by            : str   "ground_truth" or "community"
-    distance_threshold  : float spatial distance threshold for border cell selection
-    method              : str   "glm_pca" or "poisson"
-                                glm_pca  — Euclidean distance in GLM-PCA space
-                                poisson  — Poisson deviance from clump mean counts
-    """
-    glm_pca = data["glm_pca"]
-    spatial = data["spatial"]
-    labels  = data["labels"]
-    counts  = data["counts"]        # genes × cells DataFrame
-    print(glm_pca)
-
-    print(counts)
-    # ── 1. collect border cells within spatial threshold ─────────────────
-    bc_to_coord = {bc: coord for bc, coord in zip(spatial.index.values,
-                                                   spatial[["x", "y"]].values)}
-
-    layer2_bcs = [bc for bc in border_barcodes["Layer 3"] if bc in bc_to_coord]
-    layer3_bcs = [bc for bc in border_barcodes["Layer 4"] if bc in bc_to_coord]
-
-    layer2_coords = np.array([bc_to_coord[bc] for bc in layer2_bcs])
-    layer3_coords = np.array([bc_to_coord[bc] for bc in layer3_bcs])
-
-    dist_layer2 = [np.min(np.linalg.norm(layer3_coords - coord, axis=1)) for coord in layer2_coords]
-    dist_layer3 = [np.min(np.linalg.norm(layer2_coords - coord, axis=1)) for coord in layer3_coords]
-
-    closer_layer2 = [bc for bc, d in zip(layer2_bcs, dist_layer2) if d <= distance_threshold]
-    closer_layer3 = [bc for bc, d in zip(layer3_bcs, dist_layer3) if d <= distance_threshold]
-
-    print(f"Layer 1 border cells within threshold: {len(closer_layer2)}")
-    print(f"Layer 2 border cells within threshold: {len(closer_layer3)}")
-
-    mixed_barcodes = closer_layer2 + closer_layer3
-
-    layer1_clump = list(cell_clumps["Layer 3"])
-    layer2_clump = list(cell_clumps["Layer 4"])
-
-    # ── 2. distance function — swap method here ──────────────────────────
-    def glm_pca_distance(bc, avg1, avg2):
-        vec     = glm_pca.loc[bc].values.astype(float)
-        dist_l1 = float(np.linalg.norm(vec - avg1))
-        dist_l2 = float(np.linalg.norm(vec - avg2))
-        return dist_l1, dist_l2
-
-    def poisson_distance(bc, avg1, avg2):
-        """
-        Negative Poisson log-likelihood:
-        NLL = -sum( y * log(mu) - mu - log(y!) )
-        Lower NLL = cell is more likely to come from that clump's distribution.
-        """
-        eps = 1e-8
-        y   = counts.loc[bc].values.astype(float)
-
-        def nll(mu, y):
-            mu = np.maximum(mu, eps)
-            return float(np.sum(mu - y * np.log(mu) + gammaln(y + 1)))
-
-        return nll(avg1, y), nll(avg2, y)
-
-    # ── 3. compute clump averages depending on method ────────────────────
-    if method == "glm_pca":
-        avg1       = glm_pca.loc[layer1_clump].mean(axis=0).values.astype(float)
-        avg2       = glm_pca.loc[layer2_clump].mean(axis=0).values.astype(float)
-        dist_fn    = glm_pca_distance
-        dist_label = ("GLM-PCA distance to Layer1 avg", "GLM-PCA distance to Layer2 avg")
-
-    elif method == "poisson":
-        # mean count vector across clump cells (genes,)
-        avg1       = counts.loc[layer1_clump].mean(axis=0).values.astype(float)
-        avg2       = counts.loc[layer2_clump].mean(axis=0).values.astype(float)
-        dist_fn    = poisson_distance
-        dist_label = ("Poisson deviance to Layer1 avg", "Poisson deviance to Layer2 avg")
-
-    else:
-        raise ValueError("method must be 'glm_pca' or 'poisson'")
-
-    # ── 4. compute losses ────────────────────────────────────────────────
-    records = []
-    for bc in mixed_barcodes:
-        dist_l1, dist_l2 = dist_fn(bc, avg1, avg2)
-        records.append({"barcode": bc, "dist_layer1": dist_l1, "dist_layer2": dist_l2})
-    dist_df = pd.DataFrame(records).set_index("barcode")
-
-    # ── 5. igraph + Leiden ───────────────────────────────────────────────
-    node_ids   = ["Layer1_avg", "Layer2_avg"] + mixed_barcodes
-    node_index = {name: i for i, name in enumerate(node_ids)}
-
-    edges, weights = [], []
-    for bc in mixed_barcodes:
-        edges.append((node_index["Layer1_avg"], node_index[bc]))
-        weights.append(float(1 / (dist_df.loc[bc, "dist_layer1"] + 1e-8)))
-        edges.append((node_index["Layer2_avg"], node_index[bc]))
-        weights.append(float(1 / (dist_df.loc[bc, "dist_layer2"] + 1e-8)))
-
-    g = ig.Graph(n=len(node_ids), edges=edges, directed=False)
-    g.vs["name"]   = node_ids
-    g.vs["is_avg"] = [True, True] + [False] * len(mixed_barcodes)
-    g.es["weight"] = weights
-
-    part              = leidenalg.find_partition(
-        g, leidenalg.RBConfigurationVertexPartition,
-        weights=weights, resolution_parameter=1.0
-    )
-    membership        = part.membership
-    g.vs["community"] = membership
-
-    community_series = pd.Series(
-        {g.vs[node_index[bc]]["name"]: g.vs[node_index[bc]]["community"]
-         for bc in mixed_barcodes},
-        name="community"
-    )
-
-    # ── 6. color setup ───────────────────────────────────────────────────
-    if color_by == "ground_truth":
-        unique_vals    = sorted(labels.unique())
-        cmap           = plt.cm.get_cmap("tab10", len(unique_vals))
-        val_to_color   = {v: cmap(i) for i, v in enumerate(unique_vals)}
-        cell_color_fn  = lambda bc: val_to_color[labels[bc]]
-        legend_handles = [mpatches.Patch(color=val_to_color[v], label=v)
-                          for v in unique_vals]
-        color_title    = "Ground Truth"
-
-    elif color_by == "community":
-        unique_vals    = sorted(set(community_series.values))
-        n              = len(unique_vals)
-        norm           = Normalize(vmin=0, vmax=n - 1)
-        cmap           = cm.get_cmap("gist_rainbow", n)
-        val_to_color   = {v: cmap(norm(i)) for i, v in enumerate(unique_vals)}
-        cell_color_fn  = lambda bc: val_to_color[community_series[bc]]
-        legend_handles = []
-        color_title    = "Leiden Community"
-
-    else:
-        raise ValueError("color_by must be 'ground_truth' or 'community'")
-
-    # ── 7. plots ─────────────────────────────────────────────────────────
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-
-    all_coords = spatial[["x", "y"]].values
-    all_bcs    = spatial.index.values
-    gt_cmap    = plt.cm.get_cmap("Set2", len(labels.unique()))
-    gt_colors  = {cl: gt_cmap(i) for i, cl in enumerate(sorted(labels.unique()))}
-    axes[0].scatter(all_coords[:, 0], all_coords[:, 1],
-                    c=[gt_colors[labels[bc]] for bc in all_bcs],
-                    s=8, alpha=0.12, linewidths=0)
-
-    bc_colors = [cell_color_fn(bc) for bc in mixed_barcodes]
-    bc_coords = spatial.loc[mixed_barcodes, ["x", "y"]].values
-    axes[0].scatter(bc_coords[:, 0], bc_coords[:, 1],
-                    c=bc_colors, s=30, alpha=0.9,
-                    linewidths=0.4, edgecolors="white")
-
-    if legend_handles:
-        axes[0].legend(handles=legend_handles, fontsize=7, loc="upper right")
-    else:
-        sm = cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-        plt.colorbar(sm, ax=axes[0], shrink=0.6).set_label("Community index", fontsize=8)
-
-    axes[0].set_title(f"Border cells — {color_title}\n(spatial view)", fontsize=11)
-    axes[0].set_xlabel("x"); axes[0].set_ylabel("y")
-    axes[0].set_aspect("equal")
-
-    d1 = dist_df.loc[mixed_barcodes, "dist_layer1"].values
-    d2 = dist_df.loc[mixed_barcodes, "dist_layer2"].values
-    axes[1].scatter(d1, d2, c=bc_colors, s=25, alpha=0.85,
-                    linewidths=0.3, edgecolors="white")
-    axes[1].axline((0, 0), slope=1, color="grey", linewidth=0.8,
-                   linestyle="--", label="equal distance")
-    axes[1].set_xlabel(dist_label[0], fontsize=9)
-    axes[1].set_ylabel(dist_label[1], fontsize=9)
-    axes[1].set_title(f"Loss to clump avg — {color_title}\n(method: {method})", fontsize=11)
-
-    if legend_handles:
-        axes[1].legend(handles=legend_handles + [
-            mpatches.Patch(color="grey", label="Equal distance")], fontsize=7)
-    else:
-        sm2 = cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm2.set_array([])
-        plt.colorbar(sm2, ax=axes[1], shrink=0.6).set_label("Community index", fontsize=8)
-
-    plt.suptitle(f"Layer1 & Layer2 border cells — {color_title} | method: {method}", fontsize=13)
-    plt.tight_layout()
-    plt.savefig(f"minimal_test_{color_by}_{method}.png", dpi=150, bbox_inches="tight")
-    plt.show()
-
-    return g, part, dist_df, community_series
 
 def border_finder(data, radius=150):
     """
@@ -437,76 +295,9 @@ def border_finder(data, radius=150):
 
     return border_barcodes
 
-def middle_cells_in_cluster(data, n_cells=20, plot=True):
-    spatial  = data["spatial"]
-    labels   = data["labels"]
-    clusters = sorted(labels.unique())
-    
-    coords   = spatial[["x", "y"]].values
-    barcodes = spatial.index.values
-
-    selected_cells = {}
-
-    if plot:
-        plt.figure(figsize=(6, 6))
-
-    for clust in clusters:
-        # mask for cluster
-        mask = labels == clust
-        
-        cluster_coords = coords[mask]
-        cluster_barcodes = barcodes[mask]
-
-        # --- 1. find cluster center ---
-        center = np.median(cluster_coords, axis=0)
-
-        # --- 2. compute distances ---
-        dists = np.linalg.norm(cluster_coords - center, axis=1)
-
-        # --- 3. select n closest ---
-        idx = np.argsort(dists)[:n_cells]
-
-        selected_cells[clust] = cluster_barcodes[idx]
-
-        if plot:
-            # plot all cells in cluster (light)
-            plt.scatter(
-                cluster_coords[:, 0],
-                cluster_coords[:, 1],
-                s=10,
-                alpha=0.2
-            )
-
-            # plot selected "middle clump" (highlight)
-            plt.scatter(
-                cluster_coords[idx, 0],
-                cluster_coords[idx, 1],
-                s=40,
-                label=f"Cluster {clust}"
-            )
-
-            # plot center
-            plt.scatter(
-                center[0],
-                center[1],
-                marker="x",
-                s=80
-            )
-
-    if plot:
-        plt.title("Middle 10-cell clumps per cluster")
-        plt.xlabel("x")
-        plt.ylabel("y")
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
-
-    return selected_cells
-
 def poisson_loss(x, lam, eps=1e-8):
     lam = np.clip(lam, eps, None)
     return np.sum(lam - x * np.log(lam))
-
 
 def border_cell_assignment(
     data,
