@@ -428,27 +428,43 @@ def border_cell_assignment(
     return labels
 
 def load_data():
+    # visium paths 
+    visium_count = "./data/visium_count.csv"
+    visium_coor = "./data/visium_coor.csv"
+    visium_glm = "./data/visium_glm.csv"
+    visium_manual = "./data/visium_manual.csv"
+    # slideseq paths
+    slideseq_count = "./data/cerebellum_2_count.csv"
+    slideseq_coor = "./data/cerebellum_2_coor.csv"
+    slideseq_glm = "./data/cerebellum_2_count.csv"
+    slideseq_manual = "./data/cerebellum_2_manual.csv"
+    # selected paths
+    count_path = slideseq_count
+    coor_path = slideseq_coor
+    glm_path = slideseq_glm
+    manual_path = slideseq_manual
+
     # Load counts matrix (genes x cells)
-    counts_df = pd.read_csv("./data/visium_count.csv", index_col=0)
+    counts_df = pd.read_csv(count_path, index_col=0)
     print("Count loading done")
     # counts_df.index = gene names, counts_df.columns = cell barcodes
 
     # Load spatial coordinates (barcodes, ..., x, y)
-    coor_df = pd.read_csv("./data/visium_coor.csv", index_col=0)
+    coor_df = pd.read_csv(coor_path, index_col=0)
     spatial = coor_df.iloc[:, [-2, -1]]          # last two columns = x, y
     spatial.columns = ["x", "y"]
     spatial.index.name = "barcode"
     print("Coordinate loading done")
 
     # Load GLM-PCA embeddings (first two columns are redundant barcodes)
-    glm_df = pd.read_csv("./data/visium_glm.csv", index_col=0)
+    glm_df = pd.read_csv(glm_path, index_col=0)
     glm_df = glm_df.iloc[:, 1:]                  # drop the redundant barcode column
     glm_df.index.name = "barcode"
     print("GLM PCA loading done")
 
     # Load ground-truth annotations (col 1 = index, col 1 = barcode, col 2 = label)
-    gt_df = pd.read_csv("./data/visium_manual.csv", index_col=0)
-    ground_truth = gt_df.iloc[:, [0, 1]]
+    gt_df = pd.read_csv(manual_path, index_col=0)
+    ground_truth = gt_df.iloc[:, [0, 2]]
     ground_truth.columns = ["barcode", "cell_type"]
     ground_truth = ground_truth.set_index("barcode")["cell_type"]
     print("Manual Annotation loading done")
@@ -463,7 +479,7 @@ def load_data():
     glm_pca     = glm_df.loc[barcodes]                  # cells  × n_components
     labels      = ground_truth.loc[barcodes]            # cells  (Series)
     counts = counts_df[barcodes] # cells  × genes
-    counts = counts.T
+    counts = counts.T 
 
     # Get PCA embeddings
     n_pca_components = 50
