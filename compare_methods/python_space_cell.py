@@ -1,16 +1,9 @@
-import scanpy as sc
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import numpy as np
 from scipy.spatial import cKDTree
-from sklearn.cluster import DBSCAN
 import matplotlib.patches as mpatches
 from sklearn.neighbors import NearestNeighbors
-import matplotlib.cm as cm
-import igraph as ig
-import leidenalg
-from matplotlib.colors import Normalize
 from scipy.special import gammaln
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -37,7 +30,7 @@ def plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_clus
     glm_pca = data["glm_pca"]
     pca = data["pca"]
 
-    # calculate and plot
+    # calculate and plot for visium
     for i in range(0, len(keys) - 1):
         first_cluster = keys[i]
         first_cluster_avg_glm = avg_per_cluster_glm_pca[i]
@@ -121,6 +114,7 @@ def plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_clus
             mpatches.Patch(color="grey", label="Equal distance")], fontsize=7)
         plt.tight_layout()
         plt.show()
+        plt.savefig("poisson_cere" + str(i))
 
     return
 
@@ -436,7 +430,7 @@ def load_data():
     # slideseq paths
     slideseq_count = "./data/cerebellum_2_count.csv"
     slideseq_coor = "./data/cerebellum_2_coor.csv"
-    slideseq_glm = "./data/cerebellum_2_count.csv"
+    slideseq_glm = "./data/cerebellum_2_glm.csv"
     slideseq_manual = "./data/cerebellum_2_manual.csv"
     # selected paths
     count_path = slideseq_count
@@ -446,6 +440,7 @@ def load_data():
 
     # Load counts matrix (genes x cells)
     counts_df = pd.read_csv(count_path, index_col=0)
+    print(counts_df)
     print("Count loading done")
     # counts_df.index = gene names, counts_df.columns = cell barcodes
 
@@ -454,19 +449,35 @@ def load_data():
     spatial = coor_df.iloc[:, [-2, -1]]          # last two columns = x, y
     spatial.columns = ["x", "y"]
     spatial.index.name = "barcode"
+    print(spatial)
     print("Coordinate loading done")
 
     # Load GLM-PCA embeddings (first two columns are redundant barcodes)
     glm_df = pd.read_csv(glm_path, index_col=0)
-    glm_df = glm_df.iloc[:, 1:]                  # drop the redundant barcode column
+    #glm_df = glm_df.iloc[:, 1:]                  # drop the redundant barcode column for visium
     glm_df.index.name = "barcode"
+    print(glm_df)
     print("GLM PCA loading done")
 
     # Load ground-truth annotations (col 1 = index, col 1 = barcode, col 2 = label)
-    gt_df = pd.read_csv(manual_path, index_col=0)
+    gt_df = pd.read_csv(manual_path)  # index_col=0 for visium
+
     ground_truth = gt_df.iloc[:, [0, 2]]
     ground_truth.columns = ["barcode", "cell_type"]
     ground_truth = ground_truth.set_index("barcode")["cell_type"]
+
+    # Keep only selected cell types
+    keep_types = [
+        "Astrocytes",
+        "Granule",
+        "MLI2",
+        "MLI1",
+        "Bergmann",
+        "Purkinje",
+        "Oligo",
+    ]
+    ground_truth = ground_truth[ground_truth.isin(keep_types)]
+    print(ground_truth)
     print("Manual Annotation loading done")
 
 
@@ -474,7 +485,7 @@ def load_data():
     barcodes = counts_df.columns.intersection(spatial.index) \
                                 .intersection(glm_df.index) \
                                 .intersection(ground_truth.index)
-
+    print(barcodes)
     spatial     = spatial.loc[barcodes]                 # cells  × 2
     glm_pca     = glm_df.loc[barcodes]                  # cells  × n_components
     labels      = ground_truth.loc[barcodes]            # cells  (Series)
@@ -484,7 +495,7 @@ def load_data():
     # Get PCA embeddings
     n_pca_components = 50
     pca_input = counts.values
-
+    print(pca_input)
     # Scale 
     pca_input = StandardScaler().fit_transform(pca_input)
 
