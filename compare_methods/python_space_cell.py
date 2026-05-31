@@ -7,6 +7,10 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.special import gammaln
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.metrics import adjusted_rand_score, f1_score
+from scipy.optimize import linear_sum_assignment
+from sklearn.mixture import GaussianMixture
 
 def main():
     data = load_data()
@@ -15,12 +19,127 @@ def main():
     all_cell_per_cluster = find_cells_in_cluster(data)
 
     # initialize the cluster centers based on ground truth
-    avg_per_cluster_counts, avg_per_cluster_glm_pca, avg_per_cluster_pca = initialize_cluster_centers(data, all_cell_per_cluster)
+    #avg_per_cluster_counts, avg_per_cluster_glm_pca, avg_per_cluster_pca = initialize_cluster_centers(data, all_cell_per_cluster)
 
     # for two close by cells plot the loss for each cell from each cluster center
-    plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_cluster_counts, avg_per_cluster_glm_pca, avg_per_cluster_pca)
+    #plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_cluster_counts, avg_per_cluster_glm_pca, avg_per_cluster_pca)
+    # do kmeans++ and gaussian mixture model on glm pca data and plot the clustering
+    #kmeans_plot(data, all_cell_per_cluster)
+
+    cluster_with_gmm_refine_negbi(data, all_cell_per_cluster)
+    return
+
+def cluster_with_gmm_refine_negbi(data, all_cell_per_cluster):
+    n_clusters = 10
+    random_state = 10
+
+    keys     = list(all_cell_per_cluster.keys())
+    spatial  = data["spatial"]
+    labels   = data["labels"]
+    counts   = data["counts"]
+    glm_pca  = data["glm_pca"]
+    pca      = data["pca"]
+    
+    return
+
+def kmeans_plot(data, all_cell_per_cluster):
+    n_clusters = 7
+    random_state = 10
+
+    keys     = list(all_cell_per_cluster.keys())
+    spatial  = data["spatial"]
+    labels   = data["labels"]
+    counts   = data["counts"]
+    glm_pca  = data["glm_pca"]
+    pca      = data["pca"]
+
+    shared_bcs = glm_pca.index.intersection(labels.index)
+    X          = glm_pca.loc[shared_bcs].values.astype(float)
+    y_true     = labels.loc[shared_bcs].values
+
+    # kmeans ++
+    # km = KMeans(n_clusters=n_clusters, init="k-means++", n_init=10, random_state=random_state)
+    # y_pred = km.fit_predict(X)
+    
+    # gmm
+    gmm = GaussianMixture(
+        n_components    = n_clusters,
+        covariance_type = "full",
+        init_params     = "k-means++",
+        n_init          = 5,
+        random_state    = random_state,
+        max_iter        = 300,
+    )
+    gmm.fit(X)
+    y_pred = gmm.predict(X)
+    
+
+    # rand index
+    ari = adjusted_rand_score(y_true, y_pred)
+    f1  = aligned_f1(y_true, y_pred)
+    print(f"kmeans on GLM-PCA  |  k={n_clusters}  |  ARI = {ari:.4f}  |  F1 = {f1:.4f}")
+    pred_series = pd.Series(y_pred, index=shared_bcs, name="kmeans_cluster")
+
+    # plot
+    gt_unique  = sorted(labels.unique())
+    gt_cmap    = plt.cm.get_cmap("tab10", len(gt_unique))
+    gt_colors  = {v: gt_cmap(i) for i, v in enumerate(gt_unique)}
+    gt_handles = [mpatches.Patch(color=gt_colors[v], label=v) for v in gt_unique]
+
+    pred_unique = sorted(np.unique(y_pred))
+    km_cmap     = plt.cm.get_cmap("tab10", len(pred_unique))
+    km_colors   = {v: km_cmap(i) for i, v in enumerate(pred_unique)}
+    km_handles  = [mpatches.Patch(color=km_colors[v], label=f"Cluster {v}")
+                   for v in pred_unique]
+    coords = spatial.loc[shared_bcs, ["x", "y"]].values
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    # left: ground truth
+    axes[0].scatter(
+        coords[:, 0], coords[:, 1],
+        c=[gt_colors[v] for v in y_true],
+        s=20, alpha=0.95, linewidths=0.3, edgecolors="white"
+    )
+    axes[0].legend(handles=gt_handles, fontsize=7, loc="upper right")
+    axes[0].set_title("Ground truth\n(spatial view)", fontsize=11)
+    axes[0].set_xlabel("x"); axes[0].set_ylabel("y")
+    axes[0].set_aspect("equal")
+
+    # right: k-means++
+    axes[1].scatter(
+        coords[:, 0], coords[:, 1],
+        c=[km_colors[v] for v in y_pred],
+        s=20, alpha=0.95, linewidths=0.3, edgecolors="white"
+    )
+    axes[1].legend(handles=km_handles, fontsize=7, loc="upper right")
+    axes[1].set_title(f"gaussian on GLM-PCA  (k={n_clusters})\nARI = {ari:.3f} F1= {f1:.3f}",
+                      fontsize=11)
+    axes[1].set_xlabel("x"); axes[1].set_ylabel("y")
+    axes[1].set_aspect("equal")
+
+    plt.suptitle("GLM-PCA gaussian vs ground truth", fontsize=13)
+    plt.tight_layout()
+    plt.savefig(f"gaussian_glmpca_k{n_clusters}.png", dpi=150, bbox_inches="tight")
+    plt.show()
 
     return
+
+def aligned_f1(y_true, y_pred):
+    true_labels = np.unique(y_true)
+    pred_labels = np.unique(y_pred)
+
+    # build cost matrix: -overlap so Hungarian minimises = max overlap
+    cost = np.zeros((len(pred_labels), len(true_labels)))
+    for i, p in enumerate(pred_labels):
+        for j, t in enumerate(true_labels):
+            cost[i, j] = -np.sum((y_pred == p) & (y_true == t))
+
+    row_ind, col_ind = linear_sum_assignment(cost)
+    mapping = {pred_labels[r]: true_labels[c] for r, c in zip(row_ind, col_ind)}
+
+    y_pred_mapped = np.array([mapping.get(p, -1) for p in y_pred])
+    return f1_score(y_true, y_pred_mapped, average="macro")
 
 def plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_cluster_counts, avg_per_cluster_glm_pca, avg_per_cluster_pca):
     keys = list(all_cell_per_cluster.keys())
@@ -69,7 +188,7 @@ def plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_clus
             records.append({"barcode": bc, "dist_layer1": dist_l1, "dist_layer2": dist_l2})
         dist_df_negbi = pd.DataFrame(records).set_index("barcode")
 
-        # Plot glm pca
+        # Plot
         unique_vals    = sorted(labels.unique())
         cmap           = plt.cm.get_cmap("tab10", len(unique_vals))
         val_to_color   = {v: cmap(i) for i, v in enumerate(unique_vals)}
@@ -422,6 +541,7 @@ def border_cell_assignment(
     return labels
 
 def load_data():
+    data_type = "slideseq"
     # visium paths 
     visium_count = "./data/visium_count.csv"
     visium_coor = "./data/visium_coor.csv"
@@ -433,10 +553,16 @@ def load_data():
     slideseq_glm = "./data/cerebellum_2_glm.csv"
     slideseq_manual = "./data/cerebellum_2_manual.csv"
     # selected paths
-    count_path = slideseq_count
-    coor_path = slideseq_coor
-    glm_path = slideseq_glm
-    manual_path = slideseq_manual
+    if data_type == "slideseq":
+        count_path = slideseq_count
+        coor_path = slideseq_coor
+        glm_path = slideseq_glm
+        manual_path = slideseq_manual
+    else:
+        count_path = visium_count
+        coor_path = visium_coor
+        glm_path = visium_glm
+        manual_path = visium_manual
 
     # Load counts matrix (genes x cells)
     counts_df = pd.read_csv(count_path, index_col=0)
@@ -454,29 +580,34 @@ def load_data():
 
     # Load GLM-PCA embeddings (first two columns are redundant barcodes)
     glm_df = pd.read_csv(glm_path, index_col=0)
-    #glm_df = glm_df.iloc[:, 1:]                  # drop the redundant barcode column for visium
+    if data_type == "visium":
+        glm_df = glm_df.iloc[:, 1:] # drop the redundant barcode column for visium
     glm_df.index.name = "barcode"
     print(glm_df)
     print("GLM PCA loading done")
 
     # Load ground-truth annotations (col 1 = index, col 1 = barcode, col 2 = label)
-    gt_df = pd.read_csv(manual_path)  # index_col=0 for visium
-
-    ground_truth = gt_df.iloc[:, [0, 2]]
+    if data_type == "visium":
+        gt_df = pd.read_csv(manual_path, index_col=0)  # index_col=0 for visium
+        ground_truth = gt_df.iloc[:, [0, 1]]
+    else:
+        gt_df = pd.read_csv(manual_path)  # index_col=0 for visium
+        ground_truth = gt_df.iloc[:, [0, 2]]
     ground_truth.columns = ["barcode", "cell_type"]
     ground_truth = ground_truth.set_index("barcode")["cell_type"]
 
     # Keep only selected cell types
-    keep_types = [
-        "Astrocytes",
-        "Granule",
-        "MLI2",
-        "MLI1",
-        "Bergmann",
-        "Purkinje",
-        "Oligo",
-    ]
-    ground_truth = ground_truth[ground_truth.isin(keep_types)]
+    if data_type == "slideseq":
+        keep_types = [
+            "Astrocytes",
+            "Granule",
+            "MLI2",
+            "MLI1",
+            "Bergmann",
+            "Purkinje",
+            "Oligo",
+        ]
+        ground_truth = ground_truth[ground_truth.isin(keep_types)]
     print(ground_truth)
     print("Manual Annotation loading done")
 
