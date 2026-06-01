@@ -11,6 +11,9 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score, f1_score
 from scipy.optimize import linear_sum_assignment
 from sklearn.mixture import GaussianMixture
+import random
+import copy
+from collections import Counter
 
 def main():
     data = load_data()
@@ -39,8 +42,137 @@ def cluster_with_gmm_refine_negbi(data, all_cell_per_cluster):
     counts   = data["counts"]
     glm_pca  = data["glm_pca"]
     pca      = data["pca"]
+
+    # this doesnt need to be done, only loading data with groundtruth
+    shared_bcs = glm_pca.index.intersection(labels.index)
+    X          = glm_pca.loc[shared_bcs].values.astype(float)
+    y_true     = labels.loc[shared_bcs].values
+
+    # first cluster with gmm using glm pca data
+    gmm = GaussianMixture(
+        n_components    = n_clusters,
+        covariance_type = "full",
+        init_params     = "k-means++",
+        n_init          = 5,
+        random_state    = random_state,
+        max_iter        = 300,
+    )
+    gmm.fit(X)
+    y_pred = gmm.predict(X)
+    # get the list of cells in each cluster
+    shared_bcs_arr = np.array(shared_bcs)
+    gmm_clusters = [
+        shared_bcs_arr[y_pred == c].tolist()
+        for c in range(n_clusters)
+    ]
+    for c, bcs in enumerate(gmm_clusters):
+        print(f"GMM cluster {c}: {len(bcs)} cells")
+
+    # for each cluster make a stack/list whatever
+    cluster_stacks = [[] for _ in range(n_clusters)] 
     
+    # find the initial cells to add to each stack
+    for run in range(0, 100):
+        cluster_stacks_retrieved = find_best_cells_to_add_to_each_stack(cluster_stacks, gmm_clusters, counts, run)
+        if len(cluster_stacks_retrieved) == 0:
+            break
+        else:
+            cluster_stacks = cluster_stacks_retrieved
+        # check if the cluster stacks corrospond to one ground truth or multiple
+        flat = [(bc, i) for i, stack in enumerate(cluster_stacks) for bc in stack]
+        gt_counts = Counter((my_cluster, labels[bc]) for bc, my_cluster in flat)
+        for i in range(len(cluster_stacks)):
+            breakdown = {gt: cnt for (cl, gt), cnt in gt_counts.items() if cl == i}
+            total     = sum(breakdown.values())
+            print(f"Cluster {i}  (n={total}): {breakdown}")
+    # if not separable by -ve binomial after a number of retries make a note of the unsepearable clusters (stacks) and disable one stack randomly and continue the process
+
+    # when no more cells can be added, end the process, assign the disabled stack to the closest stack, assign unassigned cells to the closest and stack
+
+    # check the ari and f1 score of the clustering
+
     return
+
+def find_best_cells_to_add_to_each_stack(original_cluster_stacks, gmm_clusters, counts, run):
+    cluster_stacks = copy.deepcopy(original_cluster_stacks)
+    # assign random cell from each cluster to the stack, and get the lowest -bi loss cell and max loss with other cells
+    best_own_cc_loss_total = float('inf')
+    best_own_cc_seed = 0
+    best_cluster_stack = []
+    not_updated = True
+    #best_other_cc_seed = 0
+    for seed in range(0, 10):
+        # set random seed
+        random.seed(seed)
+        for cluster_stack_index in range(0, len(cluster_stacks)):
+            # find available cells (barcodes)
+            available = [bc for bc in gmm_clusters[cluster_stack_index] if bc not in cluster_stacks[cluster_stack_index]]
+            if not available:
+                print(cluster_stack_index, "full!")
+                continue 
+            random_cell_for_cluster = random.choice(available)
+            # insert the random cell
+            cluster_stacks[cluster_stack_index].append(random_cell_for_cluster)
+        # initialize cluster centers for each stack
+        cc_for_stacks = initialize_cluster_centers_for_stacks(cluster_stacks, counts)
+        # check the -vebinomial loss of cluster center vs cells (should be min for current stack and max for other stacks)
+        own_cc_loss_total, other_cc_loss_total, separable = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts)
+        # print whether separable, orgin cluster loss and other cluster loss
+        print("own loss", own_cc_loss_total, "other loss", other_cc_loss_total, "separable", separable)
+        if own_cc_loss_total < best_own_cc_loss_total and separable == True:
+            best_own_cc_loss_total = own_cc_loss_total
+            best_own_cc_seed = seed
+            best_cluster_stack = copy.deepcopy(cluster_stacks)
+            not_updated = False
+        # if other_cc_loss_total > best_other_cc_loss_total:
+        #     best_other_cc_loss_total = other_cc_loss_total
+        #     best_other_cc_seed = seed
+        print("own_cc_loss", best_own_cc_loss_total, "best_seed", best_own_cc_seed, "current_seed", seed, "cells_per_stack", run + 1)
+        # go back to the original
+        cluster_stacks = copy.deepcopy(original_cluster_stacks)
+    if not_updated:
+        print("ERROR NOT UPDATED THE STACK!!!")
+    return best_cluster_stack
+
+def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts):
+    own_cc_loss_total = 0.0
+    other_cc_loss_total = 0.0
+    separable = True
+    # for each cell in cluster stacks, calculate the -ve binomial loss with each cc,
+    for cluster_index, cell_list in enumerate(cluster_stacks):
+        for cell in cell_list:
+            own_cc_loss = 0.0
+            other_cc_loss_array = []
+            for cc_index, cc_for_stack in enumerate(cc_for_stacks):
+                # calculate the own cc loss 
+                if cc_index == cluster_index:
+                    own_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts)
+                    #print("equal?", np.allclose(counts.loc[cell].values.astype(float), cc_for_stack), "own_cc_loss", own_cc_loss)
+                    own_cc_loss_total += own_cc_loss
+                # calculate the other cc loss
+                else:
+                    other_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts)
+                    other_cc_loss_array.append(other_cc_loss)
+                    other_cc_loss_total += other_cc_loss
+            for other_cc_loss in other_cc_loss_array:
+                if own_cc_loss > other_cc_loss:
+                    separable = False
+    #print(loss_array)
+    #print(own_cc_loss_total, other_cc_loss_total, separable)
+    return (own_cc_loss_total, other_cc_loss_total, separable)
+
+def initialize_cluster_centers_for_stacks(cluster_stacks, counts):
+    #print(counts.loc[cluster_stacks[0][0]].values.astype(float))
+    avg_per_cluster_counts = list()
+    for cluster_stack in cluster_stacks:
+        avg_per_cluster_counts.append(counts.loc[cluster_stack].mean(axis=0).values.astype(float))
+        # avg = counts.loc[cluster_stack].mean(axis=0).values.astype(float)
+        # single = counts.loc[cluster_stack[0]].values.astype(float)
+        # print("mean:  ", avg[:5])
+        # print("single:", single[:5])
+        # print("equal?", np.allclose(avg, single))
+        # print("======")
+    return avg_per_cluster_counts
 
 def kmeans_plot(data, all_cell_per_cluster):
     n_clusters = 7
@@ -258,6 +390,11 @@ def poisson_distance(bc, avg1, avg2, counts):
 
     return nll(avg1, y), nll(avg2, y)
 
+def negative_binomial_distance2(bc, avg, counts, theta=10.0):
+    eps = 1e-8
+    y   = counts.loc[bc].values.astype(float)
+    return nll(avg, y, theta, eps)
+
 def negative_binomial_distance(bc, avg1, avg2, counts, theta=10.0):
     """
     Negative Binomial negative log-likelihood (NB2 parameterization)
@@ -278,22 +415,21 @@ def negative_binomial_distance(bc, avg1, avg2, counts, theta=10.0):
     """
     eps = 1e-8
     y   = counts.loc[bc].values.astype(float)
+    return nll(avg1, y, theta, eps), nll(avg2, y, theta, eps)
 
-    def nll(mu, y, theta):
-        mu = np.maximum(mu, eps)
+def nll(mu, y, theta, eps = 1e-8):
+    mu = np.maximum(mu, eps)
 
-        # NB log-likelihood
-        ll = (
-            gammaln(y + theta)
-            - gammaln(theta)
-            - gammaln(y + 1)
-            + theta * np.log(theta / (theta + mu))
-            + y * np.log(mu / (theta + mu))
-        )
+    # NB log-likelihood
+    ll = (
+        gammaln(y + theta)
+        - gammaln(theta)
+        - gammaln(y + 1)
+        + theta * np.log(theta / (theta + mu))
+        + y * np.log(mu / (theta + mu))
+    )
 
-        return float(-np.sum(ll))
-
-    return nll(avg1, y, theta), nll(avg2, y, theta)
+    return float(-np.sum(ll))
 
 def initialize_cluster_centers(data, all_cell_per_cluster):
     keys = all_cell_per_cluster.keys()
