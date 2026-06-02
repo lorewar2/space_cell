@@ -1,9 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.spatial import cKDTree
 import matplotlib.patches as mpatches
-from sklearn.neighbors import NearestNeighbors
 from scipy.special import gammaln
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -19,7 +17,7 @@ def main():
     data = load_data()
     #fig, axes = glm_pca_map(data)
     # find cells in clusters 
-    all_cell_per_cluster = find_cells_in_cluster(data)
+    #all_cell_per_cluster = find_cells_in_cluster(data)
 
     # initialize the cluster centers based on ground truth
     #avg_per_cluster_counts, avg_per_cluster_glm_pca, avg_per_cluster_pca = initialize_cluster_centers(data, all_cell_per_cluster)
@@ -29,19 +27,19 @@ def main():
     # do kmeans++ and gaussian mixture model on glm pca data and plot the clustering
     #kmeans_plot(data, all_cell_per_cluster)
 
-    cluster_with_gmm_refine_negbi(data, all_cell_per_cluster)
+    cluster_with_gmm_refine_negbi(data)
     return
 
-def cluster_with_gmm_refine_negbi(data, all_cell_per_cluster):
+def cluster_with_gmm_refine_negbi(data):
     n_clusters = 10
     random_state = 10
 
-    keys     = list(all_cell_per_cluster.keys())
     spatial  = data["spatial"]
     labels   = data["labels"]
     counts   = data["counts"]
     glm_pca  = data["glm_pca"]
     pca      = data["pca"]
+    umi      = data["umi"]
 
     # this doesnt need to be done, only loading data with groundtruth
     shared_bcs = glm_pca.index.intersection(labels.index)
@@ -70,14 +68,11 @@ def cluster_with_gmm_refine_negbi(data, all_cell_per_cluster):
 
     # for each cluster make a stack/list whatever
     cluster_stacks = [[] for _ in range(n_clusters)] 
-    
+    # initialize the cluster stacks
+    cluster_stacks = find_best_cells_to_add_to_each_stack_init(cluster_stacks, gmm_clusters, counts, umi, 0)
     # find the initial cells to add to each stack
     for run in range(0, 100):
-        cluster_stacks_retrieved = find_best_cells_to_add_to_each_stack(cluster_stacks, gmm_clusters, counts, run)
-        if len(cluster_stacks_retrieved) == 0:
-            break
-        else:
-            cluster_stacks = cluster_stacks_retrieved
+        cluster_stacks = find_best_cells_to_add_to_each_stack_iter(cluster_stacks, gmm_clusters, counts, umi, run)
         # check if the cluster stacks corrospond to one ground truth or multiple
         flat = [(bc, i) for i, stack in enumerate(cluster_stacks) for bc in stack]
         gt_counts = Counter((my_cluster, labels[bc]) for bc, my_cluster in flat)
@@ -93,15 +88,49 @@ def cluster_with_gmm_refine_negbi(data, all_cell_per_cluster):
 
     return
 
-def find_best_cells_to_add_to_each_stack(original_cluster_stacks, gmm_clusters, counts, run):
+def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clusters, counts, umi, run):
     cluster_stacks = copy.deepcopy(original_cluster_stacks)
     # assign random cell from each cluster to the stack, and get the lowest -bi loss cell and max loss with other cells
-    best_own_cc_loss_total = float('inf')
-    best_own_cc_seed = 0
+    best_score_loss = float('-inf')    
+    for cluster_stack_index in range(0, len(cluster_stacks)):
+        cc_for_stacks = initialize_cluster_centers_for_stacks(cluster_stacks, counts)
+        # for each stack select the next cell with best score (lowest loss with stack and highest loss with other stacks)
+        available = [bc for bc in gmm_clusters[cluster_stack_index] if bc not in cluster_stacks[cluster_stack_index]]
+        if not available:
+            print(cluster_stack_index, "full!")
+            continue 
+        # go through all the available cells and choose
+        not_updated = True
+        best_cell = None
+        best_score_loss = float("-inf")
+        for cell_index, cell in enumerate(available):
+            cluster_stacks[cluster_stack_index].append(cell)
+            # update only the required cc
+            new_cc = initialize_cluster_centers_for_stacks(cluster_stacks, counts, True, cluster_stack_index)
+            cc_for_stacks[cluster_stack_index] = new_cc
+            # loss calculation
+            own_cc_loss_total, other_cc_loss_total, separable = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts, umi)
+            score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
+            if cell_index % 1000 == 0:
+                print("Current stack {} cell {} current score {} best score {}".format(cluster_stack_index, cell_index, score_loss, best_score_loss))
+            if score_loss > best_score_loss and separable == True:
+                best_score_loss = score_loss
+                best_cell = cell
+                not_updated = False
+            cluster_stacks[cluster_stack_index].pop()
+        if best_cell != None or not_updated != True:
+            cluster_stacks[cluster_stack_index].append(best_cell)
+    return cluster_stacks
+
+def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clusters, counts, umi, run):
+    cluster_stacks = copy.deepcopy(original_cluster_stacks)
+    # assign random cell from each cluster to the stack, and get the lowest -bi loss cell and max loss with other cells
+    best_score_loss = float('-inf')
+    best_score_seed = 0
     best_cluster_stack = []
     not_updated = True
-    #best_other_cc_seed = 0
-    for seed in range(0, 10):
+    # initial stack finding, run as much as possible and get the lowest loss cells
+    for seed in range(0, 1_000):
         # set random seed
         random.seed(seed)
         for cluster_stack_index in range(0, len(cluster_stacks)):
@@ -116,25 +145,23 @@ def find_best_cells_to_add_to_each_stack(original_cluster_stacks, gmm_clusters, 
         # initialize cluster centers for each stack
         cc_for_stacks = initialize_cluster_centers_for_stacks(cluster_stacks, counts)
         # check the -vebinomial loss of cluster center vs cells (should be min for current stack and max for other stacks)
-        own_cc_loss_total, other_cc_loss_total, separable = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts)
+        own_cc_loss_total, other_cc_loss_total, separable = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts, umi)
         # print whether separable, orgin cluster loss and other cluster loss
         print("own loss", own_cc_loss_total, "other loss", other_cc_loss_total, "separable", separable)
-        if own_cc_loss_total < best_own_cc_loss_total and separable == True:
-            best_own_cc_loss_total = own_cc_loss_total
-            best_own_cc_seed = seed
+        score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
+        if score_loss > best_score_loss and separable == True:
+            best_score_loss = score_loss
+            best_score_seed = seed
             best_cluster_stack = copy.deepcopy(cluster_stacks)
             not_updated = False
-        # if other_cc_loss_total > best_other_cc_loss_total:
-        #     best_other_cc_loss_total = other_cc_loss_total
-        #     best_other_cc_seed = seed
-        print("own_cc_loss", best_own_cc_loss_total, "best_seed", best_own_cc_seed, "current_seed", seed, "cells_per_stack", run + 1)
+        print("score", best_score_loss, "best_seed", best_score_seed, "current_seed", seed, "cells_per_stack", run + 1)
         # go back to the original
         cluster_stacks = copy.deepcopy(original_cluster_stacks)
     if not_updated:
         print("ERROR NOT UPDATED THE STACK!!!")
     return best_cluster_stack
 
-def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts):
+def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts, umi):
     own_cc_loss_total = 0.0
     other_cc_loss_total = 0.0
     separable = True
@@ -146,12 +173,12 @@ def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts):
             for cc_index, cc_for_stack in enumerate(cc_for_stacks):
                 # calculate the own cc loss 
                 if cc_index == cluster_index:
-                    own_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts)
+                    own_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts) / umi.loc[cell]
                     #print("equal?", np.allclose(counts.loc[cell].values.astype(float), cc_for_stack), "own_cc_loss", own_cc_loss)
                     own_cc_loss_total += own_cc_loss
                 # calculate the other cc loss
                 else:
-                    other_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts)
+                    other_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts) / umi.loc[cell]
                     other_cc_loss_array.append(other_cc_loss)
                     other_cc_loss_total += other_cc_loss
             for other_cc_loss in other_cc_loss_array:
@@ -161,17 +188,21 @@ def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts):
     #print(own_cc_loss_total, other_cc_loss_total, separable)
     return (own_cc_loss_total, other_cc_loss_total, separable)
 
-def initialize_cluster_centers_for_stacks(cluster_stacks, counts):
+def initialize_cluster_centers_for_stacks(cluster_stacks, counts, only_init_one = False, init_one = 0):
     #print(counts.loc[cluster_stacks[0][0]].values.astype(float))
     avg_per_cluster_counts = list()
-    for cluster_stack in cluster_stacks:
-        avg_per_cluster_counts.append(counts.loc[cluster_stack].mean(axis=0).values.astype(float))
-        # avg = counts.loc[cluster_stack].mean(axis=0).values.astype(float)
-        # single = counts.loc[cluster_stack[0]].values.astype(float)
-        # print("mean:  ", avg[:5])
-        # print("single:", single[:5])
-        # print("equal?", np.allclose(avg, single))
-        # print("======")
+    if only_init_one == True:
+        avg_per_cluster_count = counts.loc[cluster_stacks[init_one]].mean(axis=0).values.astype(float)
+        return avg_per_cluster_count
+    else:
+        for cluster_stack in cluster_stacks:
+            avg_per_cluster_counts.append(counts.loc[cluster_stack].mean(axis=0).values.astype(float))
+            # avg = counts.loc[cluster_stack].mean(axis=0).values.astype(float)
+            # single = counts.loc[cluster_stack[0]].values.astype(float)
+            # print("mean:  ", avg[:5])
+            # print("single:", single[:5])
+            # print("equal?", np.allclose(avg, single))
+            # print("======")
     return avg_per_cluster_counts
 
 def kmeans_plot(data, all_cell_per_cluster):
@@ -277,6 +308,7 @@ def plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_clus
     keys = list(all_cell_per_cluster.keys())
     spatial  = data["spatial"]
     labels   = data["labels"]
+    umi   = data["umi"]
     counts = data["counts"]
     glm_pca = data["glm_pca"]
     pca = data["pca"]
@@ -311,12 +343,16 @@ def plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_clus
         records = []
         for bc in mixed_barcodes:
             dist_l1, dist_l2 = poisson_distance(bc, first_cluster_avg_counts, second_cluster_avg_counts, counts)
+            dist_l1 = dist_l1 / umi.loc[bc]
+            dist_l2 = dist_l2 / umi.loc[bc]
             records.append({"barcode": bc, "dist_layer1": dist_l1, "dist_layer2": dist_l2})
         dist_df_poisson = pd.DataFrame(records).set_index("barcode")
         # calculcate negative binomial loss
         records = []
         for bc in mixed_barcodes:
             dist_l1, dist_l2 = negative_binomial_distance(bc, first_cluster_avg_counts, second_cluster_avg_counts, counts)
+            dist_l1 = dist_l1 / umi.loc[bc]
+            dist_l2 = dist_l2 / umi.loc[bc]
             records.append({"barcode": bc, "dist_layer1": dist_l1, "dist_layer2": dist_l2})
         dist_df_negbi = pd.DataFrame(records).set_index("barcode")
 
@@ -349,24 +385,23 @@ def plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_clus
         axes[0].set_xlabel("x"); axes[0].set_ylabel("y")
         axes[0].set_aspect("equal")
 
-        d1 = dist_df_poisson.loc[mixed_barcodes, "dist_layer1"].values
-        d2 = dist_df_poisson.loc[mixed_barcodes, "dist_layer2"].values
+        d1 = dist_df_negbi.loc[mixed_barcodes, "dist_layer1"].values
+        d2 = dist_df_negbi.loc[mixed_barcodes, "dist_layer2"].values
         axes[1].scatter(d1, d2, c=bc_colors, s=15, alpha=0.55,
                         linewidths=0.3, edgecolors="white")
         axes[1].axline((0, 0), slope=1, color="grey", linewidth=0.8,
                     linestyle="--", label="equal distance")
-        axes[1].set_xlabel("loss to cc1 avg", fontsize=9)
-        axes[1].set_ylabel("loss to cc2 avg", fontsize=9)
+        axes[1].set_xlabel("log(loss to cc1 avg) / umi", fontsize=9)
+        axes[1].set_ylabel("log(loss to cc2 avg) / umi", fontsize=9)
         axes[1].set_title(f"Loss to cluster center avg — {color_title}\n(method)", fontsize=11)
-        #axes[1].set_xlim(0, 100)
-        #axes[1].set_ylim(0, 100)
+        #axes[1].set_xlim(0, 7.5)
+        #axes[1].set_ylim(0, 7.5)
 
         axes[1].legend(handles=legend_handles + [
             mpatches.Patch(color="grey", label="Equal distance")], fontsize=7)
         plt.tight_layout()
+        plt.savefig("negbi_slide" + str(i))
         plt.show()
-        plt.savefig("poisson_cere" + str(i))
-
     return
 
 
@@ -390,12 +425,12 @@ def poisson_distance(bc, avg1, avg2, counts):
 
     return nll(avg1, y), nll(avg2, y)
 
-def negative_binomial_distance2(bc, avg, counts, theta=10.0):
+def negative_binomial_distance2(bc, avg, counts, theta=0.01):
     eps = 1e-8
     y   = counts.loc[bc].values.astype(float)
     return nll(avg, y, theta, eps)
 
-def negative_binomial_distance(bc, avg1, avg2, counts, theta=10.0):
+def negative_binomial_distance(bc, avg1, avg2, counts, theta=0.01):
     """
     Negative Binomial negative log-likelihood (NB2 parameterization)
 
@@ -479,202 +514,9 @@ def find_cells_in_cluster(data):
         cluster_barcodes[own_cluster].append(bc)
     return cluster_barcodes
 
-def border_finder(data, radius=150):
-    """
-    Border cells: cells that have at least one neighbour within `radius`
-    belonging to a different ground-truth cluster.
-
-    Parameters
-    ----------
-    data   : dict   output of load_data()
-    radius : float  spatial distance threshold
-
-    Returns
-    -------
-    border_barcodes : dict  {cluster_name: [barcode, ...]}
-    """
-    spatial  = data["spatial"]
-    labels   = data["labels"]
-    clusters = sorted(labels.unique())
-
-    coords   = spatial[["x", "y"]].values
-    barcodes = spatial.index.values
-    tree     = cKDTree(coords)
-
-    cmap      = plt.cm.get_cmap("tab10", len(clusters))
-    color_map = {cl: cmap(i) for i, cl in enumerate(clusters)}
-
-    border_barcodes = {cl: [] for cl in clusters}
-
-    for i, bc in enumerate(barcodes):
-        neighbour_idxs = tree.query_ball_point(coords[i], r=radius)
-        neighbour_idxs = [j for j in neighbour_idxs if j != i]
-
-        own_cluster        = labels[bc]
-        neighbour_clusters = {labels[barcodes[j]] for j in neighbour_idxs}
-
-        # border = at least one neighbour is from a different cluster
-        if neighbour_clusters - {own_cluster}:
-            border_barcodes[own_cluster].append(bc)
-
-    # ── plot ────────────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(10, 8))
-
-    # all cells faint in background
-    ax.scatter(coords[:, 0], coords[:, 1],
-               c=[color_map[labels[bc]] for bc in barcodes],
-               s=8, alpha=0.12, linewidths=0)
-
-    # border cells solid
-    for cl, bcs in border_barcodes.items():
-        if not bcs:
-            continue
-        bc_coords = spatial.loc[bcs, ["x", "y"]].values
-        ax.scatter(bc_coords[:, 0], bc_coords[:, 1],
-                   color=color_map[cl], s=20, alpha=0.95,
-                   linewidths=0, label=f"{cl}  (n={len(bcs)})")
-
-    ax.legend(fontsize=7, markerscale=1.5, loc="upper right")
-    ax.set_title(f"Border cells per cluster  (radius={radius})", fontsize=12)
-    ax.set_xlabel("x"); ax.set_ylabel("y")
-    ax.set_aspect("equal")
-    plt.tight_layout()
-    plt.savefig("border_cells.png", dpi=150, bbox_inches="tight")
-    #plt.show()
-
-    return border_barcodes
-
 def poisson_loss(x, lam, eps=1e-8):
     lam = np.clip(lam, eps, None)
     return np.sum(lam - x * np.log(lam))
-
-def border_cell_assignment(
-    data,
-    selected_cells,
-    border_barcodes,
-    beta=1.0,
-    n_neighbors=6,
-    n_iters=5,
-    plot=True
-):
-    spatial  = data["spatial"]
-    counts   = data["counts"]
-
-    # --- flatten border_barcodes ---
-    if isinstance(border_barcodes, dict):
-        border_barcodes = [bc for bcs in border_barcodes.values() for bc in bcs]
-
-    clusters = list(selected_cells.keys())
-
-    # --- 1. normalize counts (log1p CPM style) ---
-    libsize = counts.sum(axis=1).values.reshape(-1, 1)
-    norm_counts = counts.values / (libsize + 1e-8) * 1e4
-    log_counts = np.log1p(norm_counts)
-
-    log_counts = np.array(log_counts)
-    barcodes_all = counts.index.values
-    bc_to_idx = {bc: i for i, bc in enumerate(barcodes_all)}
-
-    # --- 2. fit Gaussian per cluster ---
-    cluster_means = {}
-    cluster_covs = {}
-
-    for clust in clusters:
-        idx = [bc_to_idx[bc] for bc in selected_cells[clust]]
-        X = log_counts[idx]
-
-        mu = X.mean(axis=0)
-        cov = np.cov(X, rowvar=False) + np.eye(X.shape[1]) * 0.01
-
-        cluster_means[clust] = mu
-        cluster_covs[clust] = cov
-
-    inv_covs = {cl: np.linalg.inv(cluster_covs[cl]) for cl in clusters}
-
-    # --- 3. build spatial neighbor graph ---
-    coords = spatial[["x", "y"]].values
-    nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(coords)
-    _, indices = nbrs.kneighbors(coords)
-
-    # --- 4. initialize labels (GMM only) ---
-    labels = {}
-
-    for bc in border_barcodes:
-        i = bc_to_idx[bc]
-        x = log_counts[i]
-
-        losses = {}
-        for clust in clusters:
-            mu = cluster_means[clust]
-            inv_cov = inv_covs[clust]
-
-            diff = x - mu
-            mahal = diff.T @ inv_cov @ diff
-            losses[clust] = mahal
-
-        labels[bc] = min(losses, key=losses.get)
-
-    # --- 5. HMRF iterations (ICM) ---
-    for _ in range(n_iters):
-        for bc in border_barcodes:
-            i = bc_to_idx[bc]
-            x = log_counts[i]
-
-            neighbor_idxs = indices[i]
-            neighbor_bcs = [barcodes_all[j] for j in neighbor_idxs if barcodes_all[j] in labels]
-
-            losses = {}
-
-            for clust in clusters:
-                # --- expression term ---
-                mu = cluster_means[clust]
-                inv_cov = inv_covs[clust]
-
-                diff = x - mu
-                expr_loss = diff.T @ inv_cov @ diff
-
-                # --- spatial term ---
-                disagree = sum(labels.get(nb) != clust for nb in neighbor_bcs)
-                spatial_loss = beta * disagree
-
-                losses[clust] = expr_loss + spatial_loss
-
-            labels[bc] = min(losses, key=losses.get)
-
-    # --- 6. plot ---
-    if plot:
-        plt.figure(figsize=(6, 6))
-
-        # background
-        all_coords = spatial[["x", "y"]].values
-        plt.scatter(all_coords[:, 0], all_coords[:, 1], s=5, alpha=0.1)
-
-        # core cells
-        for clust in clusters:
-            sel_coords = spatial.loc[selected_cells[clust]][["x", "y"]].values
-            plt.scatter(sel_coords[:, 0], sel_coords[:, 1], s=40, label=f"Core {clust}")
-
-        # border assignments
-        for clust in clusters:
-            assigned = [bc for bc, c in labels.items() if c == clust]
-            if not assigned:
-                continue
-
-            bc_coords = spatial.loc[assigned][["x", "y"]].values
-            plt.scatter(
-                bc_coords[:, 0],
-                bc_coords[:, 1],
-                marker="x",
-                s=60,
-                label=f"Border→{clust}"
-            )
-
-        plt.legend()
-        plt.title("Border Assignment (HMRF)")
-        plt.tight_layout()
-        plt.show()
-
-    return labels
 
 def load_data():
     data_type = "slideseq"
@@ -747,7 +589,6 @@ def load_data():
     print(ground_truth)
     print("Manual Annotation loading done")
 
-
     # Align everything to the shared set of barcodes
     barcodes = counts_df.columns.intersection(spatial.index) \
                                 .intersection(glm_df.index) \
@@ -757,9 +598,14 @@ def load_data():
     glm_pca     = glm_df.loc[barcodes]                  # cells  × n_components
     labels      = ground_truth.loc[barcodes]            # cells  (Series)
     counts = counts_df[barcodes] # cells  × genes
-    counts = counts.T 
-
-    # Get PCA embeddings
+    counts = counts.T
+    # calculate the umi per cell (total counts)
+    umi_per_cell = counts.sum(axis=1).astype(int)
+    umi_per_cell.name = "umi"
+    print(f"UMI per cell — min: {umi_per_cell.min()}, "
+          f"median: {umi_per_cell.median()}, max: {umi_per_cell.max()}")
+    
+    # get PCA embeddings
     n_pca_components = 50
     pca_input = counts.values
     print(pca_input)
@@ -785,8 +631,9 @@ def load_data():
         "counts": counts,           # DataFrame: cells × genes
         "spatial": spatial,         # DataFrame: cells × {x, y}
         "glm_pca": glm_pca,         # DataFrame: cells × GLM-PCA components
-        "pca": pca,              # DataFrame: cells × PCA components
+        "pca": pca,                 # DataFrame: cells × PCA components
         "labels": labels,           # Series: cells → cell_type string
+        "umi": umi_per_cell         # Series:    cells → total UMI count
     }
 
 if __name__ == "__main__":
