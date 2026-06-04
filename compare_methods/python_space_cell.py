@@ -31,9 +31,9 @@ def main():
     return
 
 def cluster_with_gmm_refine_negbi(data):
-    n_clusters = 10
+    n_clusters = 6
     random_state = 10
-
+    show_gaussian_cluster_result = False
     spatial  = data["spatial"]
     labels   = data["labels"]
     counts   = data["counts"]
@@ -57,6 +57,19 @@ def cluster_with_gmm_refine_negbi(data):
     )
     gmm.fit(X)
     y_pred = gmm.predict(X)
+    # Look into how gmm clustered
+    if show_gaussian_cluster_result == True:
+        gt_counts = Counter(zip(y_pred, y_true))
+        for cluster_id in range(n_clusters):
+            breakdown = {
+                gt: cnt
+                for (cl, gt), cnt in gt_counts.items()
+                if cl == cluster_id
+            }
+            total = sum(breakdown.values())
+            print(f"Cluster {cluster_id} (n={total})")
+            for gt, cnt in sorted(breakdown.items(), key=lambda x: x[1], reverse=True):
+                print(f"    {gt}: {cnt}")
     # get the list of cells in each cluster
     shared_bcs_arr = np.array(shared_bcs)
     gmm_clusters = [
@@ -98,7 +111,11 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
         available = [bc for bc in gmm_clusters[cluster_stack_index] if bc not in cluster_stacks[cluster_stack_index]]
         if not available:
             print(cluster_stack_index, "full!")
-            continue 
+            continue
+        # only select few of the available (half or 500 cells)
+        num_cell_to_process = min(max(len(available) / 2, 1), 500)
+        available = random.sample(available, k = num_cell_to_process)
+        print("Number of cells to process in stack", cluster_stack_index, "cells", num_cell_to_process)
         # go through all the available cells and choose
         not_updated = True
         best_cell = None
@@ -107,6 +124,7 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
             cluster_stacks[cluster_stack_index].append(cell)
             # update only the required cc
             new_cc = initialize_cluster_centers_for_stacks(cluster_stacks, counts, True, cluster_stack_index)
+            old_cc = cc_for_stacks[cluster_stack_index]
             cc_for_stacks[cluster_stack_index] = new_cc
             # loss calculation
             own_cc_loss_total, other_cc_loss_total, separable = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts, umi)
@@ -118,6 +136,7 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
                 best_cell = cell
                 not_updated = False
             cluster_stacks[cluster_stack_index].pop()
+            cc_for_stacks[cluster_stack_index] = old_cc
         if best_cell != None or not_updated != True:
             cluster_stacks[cluster_stack_index].append(best_cell)
     return cluster_stacks
@@ -135,26 +154,23 @@ def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clust
         random.seed(seed)
         for cluster_stack_index in range(0, len(cluster_stacks)):
             # find available cells (barcodes)
-            available = [bc for bc in gmm_clusters[cluster_stack_index] if bc not in cluster_stacks[cluster_stack_index]]
-            if not available:
-                print(cluster_stack_index, "full!")
-                continue 
-            random_cell_for_cluster = random.choice(available)
+            random_cell_for_cluster = random.choice(gmm_clusters[cluster_stack_index])
             # insert the random cell
             cluster_stacks[cluster_stack_index].append(random_cell_for_cluster)
         # initialize cluster centers for each stack
         cc_for_stacks = initialize_cluster_centers_for_stacks(cluster_stacks, counts)
         # check the -vebinomial loss of cluster center vs cells (should be min for current stack and max for other stacks)
         own_cc_loss_total, other_cc_loss_total, separable = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts, umi)
-        # print whether separable, orgin cluster loss and other cluster loss
-        print("own loss", own_cc_loss_total, "other loss", other_cc_loss_total, "separable", separable)
+        # print whether separable, orgin cluster loss and other cluster loss  
         score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
         if score_loss > best_score_loss and separable == True:
             best_score_loss = score_loss
             best_score_seed = seed
             best_cluster_stack = copy.deepcopy(cluster_stacks)
             not_updated = False
-        print("score", best_score_loss, "best_seed", best_score_seed, "current_seed", seed, "cells_per_stack", run + 1)
+        if seed % 100 == 0:
+            print("own loss", own_cc_loss_total, "other loss", other_cc_loss_total, "separable", separable)
+            print("score", best_score_loss, "best_seed", best_score_seed, "current_seed", seed, "cells_per_stack", run + 1)
         # go back to the original
         cluster_stacks = copy.deepcopy(original_cluster_stacks)
     if not_updated:
@@ -188,21 +204,23 @@ def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts, umi):
     #print(own_cc_loss_total, other_cc_loss_total, separable)
     return (own_cc_loss_total, other_cc_loss_total, separable)
 
-def initialize_cluster_centers_for_stacks(cluster_stacks, counts, only_init_one = False, init_one = 0):
-    #print(counts.loc[cluster_stacks[0][0]].values.astype(float))
+def initialize_cluster_centers_for_stacks(cluster_stacks, counts, only_init_one=False, init_one=0, update_single=False, new_barcode=None, current_mean=None, current_count=0):
     avg_per_cluster_counts = list()
+    # only update one cell, to do test this part, run with update sinle and stack and check
+    if update_single:
+        new_value = counts.loc[new_barcode].values.astype(float)
+        if current_mean is None or current_count == 0:
+            return new_value
+        current_mean = np.asarray(current_mean, dtype=float)
+        return current_mean + (new_value - current_mean) / (current_count + 1)
+    # only one stack
     if only_init_one == True:
-        avg_per_cluster_count = counts.loc[cluster_stacks[init_one]].mean(axis=0).values.astype(float)
-        return avg_per_cluster_count
-    else:
-        for cluster_stack in cluster_stacks:
-            avg_per_cluster_counts.append(counts.loc[cluster_stack].mean(axis=0).values.astype(float))
-            # avg = counts.loc[cluster_stack].mean(axis=0).values.astype(float)
-            # single = counts.loc[cluster_stack[0]].values.astype(float)
-            # print("mean:  ", avg[:5])
-            # print("single:", single[:5])
-            # print("equal?", np.allclose(avg, single))
-            # print("======")
+        return counts.loc[cluster_stacks[init_one]].mean(axis=0).values.astype(float)
+    # calculate all cluster stack stuff
+    for cluster_stack in cluster_stacks:
+        avg_per_cluster_counts.append(
+            counts.loc[cluster_stack].mean(axis=0).values.astype(float)
+        )
     return avg_per_cluster_counts
 
 def kmeans_plot(data, all_cell_per_cluster):
