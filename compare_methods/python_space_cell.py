@@ -12,8 +12,10 @@ from sklearn.mixture import GaussianMixture
 import random
 import copy
 from collections import Counter
+import time
 
 def main():
+    # load data
     data = load_data()
     #fig, axes = glm_pca_map(data)
     # find cells in clusters 
@@ -26,14 +28,14 @@ def main():
     #plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_cluster_counts, avg_per_cluster_glm_pca, avg_per_cluster_pca)
     # do kmeans++ and gaussian mixture model on glm pca data and plot the clustering
     #kmeans_plot(data, all_cell_per_cluster)
-
+    # cluster + refine
     cluster_with_gmm_refine_negbi(data)
     return
 
 def cluster_with_gmm_refine_negbi(data):
     n_clusters = 6
     random_state = 10
-    show_gaussian_cluster_result = False
+    show_gaussian_cluster_result = True
     spatial  = data["spatial"]
     labels   = data["labels"]
     counts   = data["counts"]
@@ -106,6 +108,7 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
     # assign random cell from each cluster to the stack, and get the lowest -bi loss cell and max loss with other cells
     best_score_loss = float('-inf')    
     for cluster_stack_index in range(0, len(cluster_stacks)):
+        start_time = time.perf_counter()
         cc_for_stacks = initialize_cluster_centers_for_stacks(cluster_stacks, counts)
         # for each stack select the next cell with best score (lowest loss with stack and highest loss with other stacks)
         available = [bc for bc in gmm_clusters[cluster_stack_index] if bc not in cluster_stacks[cluster_stack_index]]
@@ -113,32 +116,41 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
             print(cluster_stack_index, "full!")
             continue
         # only select few of the available (half or 500 cells)
-        num_cell_to_process = min(max(len(available) / 2, 1), 500)
+        num_cell_to_process = int(min(max(len(available) / 2, 1), 500))
         available = random.sample(available, k = num_cell_to_process)
         print("Number of cells to process in stack", cluster_stack_index, "cells", num_cell_to_process)
         # go through all the available cells and choose
         not_updated = True
         best_cell = None
         best_score_loss = float("-inf")
+        inseparable_count = 0
         for cell_index, cell in enumerate(available):
             cluster_stacks[cluster_stack_index].append(cell)
-            # update only the required cc
-            new_cc = initialize_cluster_centers_for_stacks(cluster_stacks, counts, True, cluster_stack_index)
             old_cc = cc_for_stacks[cluster_stack_index]
+            # update only the required using the cell barcode
+            new_cc = initialize_cluster_centers_for_stacks(None, counts, update_single=True, new_barcode=cell, current_mean=old_cc, current_count=len(cluster_stacks[cluster_stack_index]) - 1)
+            #new_cc = initialize_cluster_centers_for_stacks(cluster_stacks, counts, True, cluster_stack_index)
+            # check if cc's are the same
+            #print("equal?", np.allclose(new_cc_1, new_cc))
             cc_for_stacks[cluster_stack_index] = new_cc
             # loss calculation
             own_cc_loss_total, other_cc_loss_total, separable = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts, umi)
             score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
-            if cell_index % 1000 == 0:
+            if cell_index % int(available / 5) == 0:
                 print("Current stack {} cell {} current score {} best score {}".format(cluster_stack_index, cell_index, score_loss, best_score_loss))
             if score_loss > best_score_loss and separable == True:
                 best_score_loss = score_loss
                 best_cell = cell
                 not_updated = False
+            if separable == False:
+                inseparable_count += 1
             cluster_stacks[cluster_stack_index].pop()
             cc_for_stacks[cluster_stack_index] = old_cc
+        
         if best_cell != None or not_updated != True:
             cluster_stacks[cluster_stack_index].append(best_cell)
+        end_time = time.perf_counter()
+        print(f"Elapsed time for stack: {(end_time - start_time):.6f} seconds, insepeparable cells {inseparable_count}")
     return cluster_stacks
 
 def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clusters, counts, umi, run):
@@ -149,7 +161,7 @@ def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clust
     best_cluster_stack = []
     not_updated = True
     # initial stack finding, run as much as possible and get the lowest loss cells
-    for seed in range(0, 1_000):
+    for seed in range(11_700, 11_800):
         # set random seed
         random.seed(seed)
         for cluster_stack_index in range(0, len(cluster_stacks)):
@@ -203,6 +215,41 @@ def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts, umi):
     #print(loss_array)
     #print(own_cc_loss_total, other_cc_loss_total, separable)
     return (own_cc_loss_total, other_cc_loss_total, separable)
+
+def loss_cells_per_cc_with_prior_knowledge():
+    # old cc own loss and other loss is known so using additive rule only calculate diff between old vs new and new cell loss
+
+    return
+
+def L(obs, ref, theta=0.01, eps=1e-8):
+    return nll(ref, obs, theta, eps) # nll(mu=ref, y=obs)
+
+def own_after_add(own_old, n_old, mu_old, mu_new, y_c, theta=0.01):
+    shift = n_old * (L(mu_old, mu_new, theta) - L(mu_old, mu_old, theta))
+    return own_old + shift + L(y_c, mu_new, theta)
+
+def other_after_add(other_old, n_other, mu_bar_other, mu_old, mu_new, theta=0.01):
+    return other_old + n_other * (L(mu_bar_other, mu_new, theta)
+                                  - L(mu_bar_other, mu_old, theta))
+
+def negative_binomial_distance2(bc, avg, counts, theta=0.01):
+    eps = 1e-8
+    y   = counts.loc[bc].values.astype(float)
+    return nll(avg, y, theta, eps)
+
+def nll(mu, y, theta, eps = 1e-8):
+    mu = np.maximum(mu, eps)
+
+    # NB log-likelihood
+    ll = (
+        gammaln(y + theta)
+        - gammaln(theta)
+        - gammaln(y + 1)
+        + theta * np.log(theta / (theta + mu))
+        + y * np.log(mu / (theta + mu))
+    )
+
+    return float(-np.sum(ll))
 
 def initialize_cluster_centers_for_stacks(cluster_stacks, counts, only_init_one=False, init_one=0, update_single=False, new_barcode=None, current_mean=None, current_count=0):
     avg_per_cluster_counts = list()
@@ -443,11 +490,6 @@ def poisson_distance(bc, avg1, avg2, counts):
 
     return nll(avg1, y), nll(avg2, y)
 
-def negative_binomial_distance2(bc, avg, counts, theta=0.01):
-    eps = 1e-8
-    y   = counts.loc[bc].values.astype(float)
-    return nll(avg, y, theta, eps)
-
 def negative_binomial_distance(bc, avg1, avg2, counts, theta=0.01):
     """
     Negative Binomial negative log-likelihood (NB2 parameterization)
@@ -469,20 +511,6 @@ def negative_binomial_distance(bc, avg1, avg2, counts, theta=0.01):
     eps = 1e-8
     y   = counts.loc[bc].values.astype(float)
     return nll(avg1, y, theta, eps), nll(avg2, y, theta, eps)
-
-def nll(mu, y, theta, eps = 1e-8):
-    mu = np.maximum(mu, eps)
-
-    # NB log-likelihood
-    ll = (
-        gammaln(y + theta)
-        - gammaln(theta)
-        - gammaln(y + 1)
-        + theta * np.log(theta / (theta + mu))
-        + y * np.log(mu / (theta + mu))
-    )
-
-    return float(-np.sum(ll))
 
 def initialize_cluster_centers(data, all_cell_per_cluster):
     keys = all_cell_per_cluster.keys()
