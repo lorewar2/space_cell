@@ -133,7 +133,7 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
             # check if cc's are the same
             #print("equal?", np.allclose(new_cc_1, new_cc))
             cc_for_stacks[cluster_stack_index] = new_cc
-            # loss calculation
+            # loss calculation need to update this function
             own_cc_loss_total, other_cc_loss_total, separable = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts, umi)
             score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
             if cell_index % int(available / 5) == 0:
@@ -152,6 +152,36 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
         end_time = time.perf_counter()
         print(f"Elapsed time for stack: {(end_time - start_time):.6f} seconds, insepeparable cells {inseparable_count}")
     return cluster_stacks
+
+def loss_cells_per_cc_2 (cc_for_stacks, cluster_stacks, counts, umi):
+    own_cc_loss_total = 0.0
+    other_cc_loss_total = 0.0
+    separable = True
+    # caluculate the loss from each cc to cell
+
+    # for each cell in cluster stacks, calculate the -ve binomial loss with each cc,
+    for cluster_index, cell_list in enumerate(cluster_stacks):
+        for cell in cell_list:
+            own_cc_loss = 0.0
+            other_cc_loss_array = []
+            for cc_index, cc_for_stack in enumerate(cc_for_stacks):
+                # calculate the own cc loss 
+                if cc_index == cluster_index:
+                    # maybe i should check the own loss before adding this new cell !!!!!!!!!!!!!!!!!!!!!!!!!!!
+                    own_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts) / umi.loc[cell]
+                    #print("equal?", np.allclose(counts.loc[cell].values.astype(float), cc_for_stack), "own_cc_loss", own_cc_loss)
+                    own_cc_loss_total += own_cc_loss
+                # calculate the other cc loss
+                else:
+                    other_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts) / umi.loc[cell]
+                    other_cc_loss_array.append(other_cc_loss)
+                    other_cc_loss_total += other_cc_loss
+            for other_cc_loss in other_cc_loss_array:
+                if own_cc_loss > other_cc_loss:
+                    separable = False
+    #print(loss_array)
+    #print(own_cc_loss_total, other_cc_loss_total, separable)
+    return (own_cc_loss_total, other_cc_loss_total, separable)
 
 def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clusters, counts, umi, run):
     cluster_stacks = copy.deepcopy(original_cluster_stacks)
