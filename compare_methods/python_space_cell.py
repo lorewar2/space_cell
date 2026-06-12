@@ -85,6 +85,7 @@ def cluster_with_gmm_refine_negbi(data):
     cluster_stacks = [[] for _ in range(n_clusters)] 
     # initialize the cluster stacks
     cluster_stacks = find_best_cells_to_add_to_each_stack_init(cluster_stacks, gmm_clusters, counts, umi, 0)
+
     # find the initial cells to add to each stack
     for run in range(0, 1_000):
         cluster_stacks = find_best_cells_to_add_to_each_stack_iter(cluster_stacks, gmm_clusters, counts, umi, run)
@@ -105,20 +106,22 @@ def cluster_with_gmm_refine_negbi(data):
 
 def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clusters, counts, umi, run):
     # based on the run increase theta
-    theta = 10 / max(run / 10, 1)
+    #theta = 10 / max(run / 10, 1)
+    theta = min(run / 10, 100)
     cluster_stacks = copy.deepcopy(original_cluster_stacks)
     # assign random cell from each cluster to the stack, and get the lowest -bi loss cell and max loss with other cells
     best_score_loss = float('-inf')
     for cluster_stack_index in range(0, len(cluster_stacks)):
         start_time = time.perf_counter()
         cc_for_stacks = initialize_cluster_centers_for_stacks(cluster_stacks, counts)
+        other_clusters_preferred = [0] * len(cluster_stacks)
         # for each stack select the next cell with best score (lowest loss with stack and highest loss with other stacks)
         available = [bc for bc in gmm_clusters[cluster_stack_index] if bc not in cluster_stacks[cluster_stack_index]]
         if not available:
             print(cluster_stack_index, "full!")
             continue
-        # only select few of the available (half or 500 cells)
-        num_cell_to_process = int(min(max(len(available) / 2, 1), 50))
+        # select 1000 or available
+        num_cell_to_process = int(min(len(available), 1000))
         available = random.sample(available, k = num_cell_to_process)
         print("Number of cells to process in stack", cluster_stack_index, "cells", len(available), "theta", theta)
         # go through all the available cells and choose
@@ -127,16 +130,7 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
         best_score_loss = float("-inf")
         inseparable_count = 0
         for cell_index, cell in enumerate(available):
-            #cluster_stacks[cluster_stack_index].append(cell)
-            #old_cc = cc_for_stacks[cluster_stack_index]
-            # update only the required using the cell barcode
-            #new_cc = initialize_cluster_centers_for_stacks(None, counts, update_single=True, new_barcode=cell, current_mean=old_cc, current_count=len(cluster_stacks[cluster_stack_index]) - 1)
-            #new_cc = initialize_cluster_centers_for_stacks(cluster_stacks, counts, True, cluster_stack_index)
-            # check if cc's are the same
-            #print("equal?", np.allclose(new_cc_1, new_cc))
-            #cc_for_stacks[cluster_stack_index] = new_cc
-            # loss calculation need to update this function
-            own_cc_loss_total, other_cc_loss_total, separable = loss_cells_per_cc_2(cell, cluster_stack_index, cc_for_stacks, counts, umi, theta)
+            own_cc_loss_total, other_cc_loss_total, separable, preferred_cluster = loss_cells_per_cc_2(cell, cluster_stack_index, cc_for_stacks, counts, umi, theta)
             score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
             if cell_index % int(len(available) / 5) == 0:
                 print("Current stack {} cell {} current score {} best score {}".format(cluster_stack_index, cell_index, score_loss, best_score_loss))
@@ -146,36 +140,28 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
                 not_updated = False
             if separable == False:
                 inseparable_count += 1
-            #cluster_stacks[cluster_stack_index].pop()
-            #cc_for_stacks[cluster_stack_index] = old_cc
+                other_clusters_preferred[preferred_cluster] += 1
         if best_cell != None or not_updated != True:
             cluster_stacks[cluster_stack_index].append(best_cell)
         end_time = time.perf_counter()
         print(f"Elapsed time for stack: {(end_time - start_time):.6f} seconds, inseparable cells {inseparable_count}")
+        print("Preferred Other Clusters", other_clusters_preferred)
     return cluster_stacks
 
 def loss_cells_per_cc_2 (cell, cluster_stack_index, cc_for_stacks, counts, umi , theta):
-    own_cc_loss = 0.0
-    other_cc_loss_total = 0.0
+    cc_loss_array = np.zeros(len(cc_for_stacks))
     separable = True
-    other_cc_loss_array = []
-    # caluculate the loss from each cc to cell
+    # calculate the loss from each cc to cell
     for cc_index, cc_for_stack in enumerate(cc_for_stacks):
-        # cells own stack
-        if cluster_stack_index == cc_index:
-            # calculate own loss here
-            own_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts, theta) / umi.loc[cell]
-            #print("equal?", np.allclose(counts.loc[cell].values.astype(float), cc_for_stack), "own_cc_loss", own_cc_loss)
-        # other stacks
-        else:
-            # calculate other loss here
-            other_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts, theta) / umi.loc[cell]
-            other_cc_loss_array.append(other_cc_loss)
-            other_cc_loss_total += other_cc_loss
-    for other_cc_loss in other_cc_loss_array:
-        if own_cc_loss > other_cc_loss:
-            separable = False
-    return (own_cc_loss, other_cc_loss_total, separable)
+        cc_loss_array[cc_index] = negative_binomial_distance2(cell, cc_for_stack, counts, theta) / umi.loc[cell]
+    # get the index of the minimum value
+    min_index = np.argmin(cc_loss_array)
+    min_value = cc_loss_array[min_index]
+    if min_index != cluster_stack_index:
+        separable = False
+    own_cc_loss = cc_loss_array[cluster_stack_index]
+    other_cc_loss_total = cc_loss_array.sum() - own_cc_loss
+    return (own_cc_loss, other_cc_loss_total, separable, min_index)
 
 def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clusters, counts, umi, run):
     cluster_stacks = copy.deepcopy(original_cluster_stacks)
@@ -225,12 +211,12 @@ def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts, umi):
             for cc_index, cc_for_stack in enumerate(cc_for_stacks):
                 # calculate the own cc loss 
                 if cc_index == cluster_index:
-                    own_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts, theta=1) / umi.loc[cell]
+                    own_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts, theta=0.1) / umi.loc[cell]
                     #print("equal?", np.allclose(counts.loc[cell].values.astype(float), cc_for_stack), "own_cc_loss", own_cc_loss)
                     own_cc_loss_total += own_cc_loss
                 # calculate the other cc loss
                 else:
-                    other_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts, theta=1) / umi.loc[cell]
+                    other_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts, theta=0.1) / umi.loc[cell]
                     other_cc_loss_array.append(other_cc_loss)
                     other_cc_loss_total += other_cc_loss
             for other_cc_loss in other_cc_loss_array:
