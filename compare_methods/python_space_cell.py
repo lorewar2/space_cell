@@ -28,11 +28,80 @@ def main():
     #plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_cluster_counts, avg_per_cluster_glm_pca, avg_per_cluster_pca)
     # do kmeans++ and gaussian mixture model on glm pca data and plot the clustering
     #kmeans_plot(data, all_cell_per_cluster)
-    # cluster + refine
-    cluster_with_gmm_refine_negbi(data)
+    # cluster + refine  
+    best_clustering = cluster_with_gmm(data)
+    gmm_refine_negbi(data, best_clustering)
     return
 
-def cluster_with_gmm_refine_negbi(data):
+def cluster_with_gmm(data):
+    highest_scoring_ari = 0.0
+    highest_score = float("-inf")
+    highest_clustering = None
+    n_clusters = 6
+    show_gaussian_cluster_result = False
+    labels   = data["labels"]
+    counts   = data["counts"]
+    glm_pca  = data["glm_pca"]
+    umi      = data["umi"]
+
+    # this doesnt need to be done, only loading data with groundtruth
+    shared_bcs = glm_pca.index.intersection(labels.index)
+    X          = glm_pca.loc[shared_bcs].values.astype(float)
+    y_true     = labels.loc[shared_bcs].values
+
+    # lopp here
+    for seed in range(0, 100):
+        # first cluster with gmm using glm pca data
+        gmm = GaussianMixture(
+            n_components    = n_clusters,
+            covariance_type = "full",
+            init_params     = "random",
+            n_init          = 50,
+            random_state    = seed,
+            max_iter        = 300,
+        )
+        gmm.fit(X)
+        y_pred = gmm.predict(X)
+
+        # calculate the ari
+        ari = adjusted_rand_score(y_true, y_pred)
+
+        # get the list of cells in each cluster
+        shared_bcs_arr = np.array(shared_bcs)
+        gmm_clusters = [
+            shared_bcs_arr[y_pred == c].tolist()
+            for c in range(n_clusters)
+        ]
+        # check the -ve binomial loss for the clustering
+        cc_for_stacks = initialize_cluster_centers_for_stacks(gmm_clusters, counts)
+        # for each cell calculate the own loss and the other loss
+        own_cc_loss_total, other_cc_loss_total, separable = loss_cells_per_cc(cc_for_stacks, gmm_clusters, counts, umi)
+        score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
+        # print all the stuff
+        print("Seed", seed, "ARI", ari, "score", score_loss, "separable", separable)
+        # save the best
+
+        if score_loss > highest_score:
+            highest_clustering = copy.deepcopy(gmm_clusters)
+            highest_score = score_loss
+            highest_scoring_ari = ari
+        if show_gaussian_cluster_result == True:
+            gt_counts = Counter(zip(y_pred, y_true))
+            for cluster_id in range(n_clusters):
+                breakdown = {
+                    gt: cnt
+                    for (cl, gt), cnt in gt_counts.items()
+                    if cl == cluster_id
+                }
+                total = sum(breakdown.values())
+                print(f"Cluster {cluster_id} (n={total})")
+                for gt, cnt in sorted(breakdown.items(), key=lambda x: x[1], reverse=True):
+                    print(f"    {gt}: {cnt}")
+            print("=========================================")
+    print("highest ari", highest_scoring_ari, "highest score", highest_score)
+    return highest_clustering
+
+def gmm_refine_negbi(data, gmm_clusters):
     n_clusters = 6
     random_state = 10
     show_gaussian_cluster_result = True
@@ -43,44 +112,6 @@ def cluster_with_gmm_refine_negbi(data):
     pca      = data["pca"]
     umi      = data["umi"]
 
-    # this doesnt need to be done, only loading data with groundtruth
-    shared_bcs = glm_pca.index.intersection(labels.index)
-    X          = glm_pca.loc[shared_bcs].values.astype(float)
-    y_true     = labels.loc[shared_bcs].values
-
-    # first cluster with gmm using glm pca data
-    gmm = GaussianMixture(
-        n_components    = n_clusters,
-        covariance_type = "full",
-        init_params     = "k-means++",
-        n_init          = 5,
-        random_state    = random_state,
-        max_iter        = 300,
-    )
-    gmm.fit(X)
-    y_pred = gmm.predict(X)
-    # Look into how gmm clustered
-    if show_gaussian_cluster_result == True:
-        gt_counts = Counter(zip(y_pred, y_true))
-        for cluster_id in range(n_clusters):
-            breakdown = {
-                gt: cnt
-                for (cl, gt), cnt in gt_counts.items()
-                if cl == cluster_id
-            }
-            total = sum(breakdown.values())
-            print(f"Cluster {cluster_id} (n={total})")
-            for gt, cnt in sorted(breakdown.items(), key=lambda x: x[1], reverse=True):
-                print(f"    {gt}: {cnt}")
-    # get the list of cells in each cluster
-    shared_bcs_arr = np.array(shared_bcs)
-    gmm_clusters = [
-        shared_bcs_arr[y_pred == c].tolist()
-        for c in range(n_clusters)
-    ]
-    for c, bcs in enumerate(gmm_clusters):
-        print(f"GMM cluster {c}: {len(bcs)} cells")
-
     # for each cluster make a stack/list whatever
     cluster_stacks = [[] for _ in range(n_clusters)] 
     # initialize the cluster stacks
@@ -88,7 +119,7 @@ def cluster_with_gmm_refine_negbi(data):
 
     # find the initial cells to add to each stack
     for run in range(0, 1_000):
-        cluster_stacks = find_best_cells_to_add_to_each_stack_iter(cluster_stacks, gmm_clusters, counts, umi, run)
+        cluster_stacks = find_best_cells_to_add_to_each_stack_iter(cluster_stacks, gmm_clusters, counts, umi, run + 1)
         # check if the cluster stacks corrospond to one ground truth or multiple
         flat = [(bc, i) for i, stack in enumerate(cluster_stacks) for bc in stack]
         gt_counts = Counter((my_cluster, labels[bc]) for bc, my_cluster in flat)
@@ -171,7 +202,7 @@ def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clust
     best_cluster_stack = []
     not_updated = True
     # initial stack finding, run as much as possible and get the lowest loss cells
-    for seed in range(11_700, 11_800):
+    for seed in range(0, 100_000):
         # set random seed
         random.seed(seed)
         for cluster_stack_index in range(0, len(cluster_stacks)):
@@ -205,6 +236,7 @@ def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts, umi):
     separable = True
     # for each cell in cluster stacks, calculate the -ve binomial loss with each cc,
     for cluster_index, cell_list in enumerate(cluster_stacks):
+        #print(".")
         for cell in cell_list:
             own_cc_loss = 0.0
             other_cc_loss_array = []
