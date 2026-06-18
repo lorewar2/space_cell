@@ -30,7 +30,21 @@ def main():
     #kmeans_plot(data, all_cell_per_cluster)
     # cluster + refine  
     best_clustering = cluster_with_gmm(data)
-    gmm_refine_negbi(data, best_clustering)
+    refined = gmm_refine_negbi(data, best_clustering)
+    weights = weights_for_leiden(data, refined)
+    return
+
+def weights_for_leiden(data, refined):
+    weights = None
+    # make weights using refined and data (edge weight = -bi loss * spatial distance)
+    return weights
+
+def run_leiden():
+    # make the graph using the weighs
+
+    # run leiden
+
+    # display results
     return
 
 def cluster_with_gmm(data):
@@ -38,7 +52,7 @@ def cluster_with_gmm(data):
     highest_score = float("-inf")
     highest_clustering = None
     n_clusters = 6
-    show_gaussian_cluster_result = False
+    show_gaussian_cluster_result = True
     labels   = data["labels"]
     counts   = data["counts"]
     glm_pca  = data["glm_pca"]
@@ -127,13 +141,7 @@ def gmm_refine_negbi(data, gmm_clusters):
             breakdown = {gt: cnt for (cl, gt), cnt in gt_counts.items() if cl == i}
             total     = sum(breakdown.values())
             print(f"Cluster {i}  (n={total}): {breakdown}")
-    # if not separable by -ve binomial after a number of retries make a note of the unsepearable clusters (stacks) and disable one stack randomly and continue the process
-
-    # when no more cells can be added, end the process, assign the disabled stack to the closest stack, assign unassigned cells to the closest and stack
-
-    # check the ari and f1 score of the clustering
-
-    return
+    return cluster_stacks
 
 def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clusters, counts, umi, run):
     # based on the run increase theta
@@ -202,7 +210,7 @@ def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clust
     best_cluster_stack = []
     not_updated = True
     # initial stack finding, run as much as possible and get the lowest loss cells
-    for seed in range(0, 1_000):
+    for seed in range(0, 10_000):
         # set random seed
         random.seed(seed)
         for cluster_stack_index in range(0, len(cluster_stacks)):
