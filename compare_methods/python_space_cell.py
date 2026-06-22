@@ -13,26 +13,88 @@ import random
 import copy
 from collections import Counter
 import time
+from concurrent.futures import ThreadPoolExecutor
+from itertools import repeat
 
 def main():
     # load data
     data = load_data()
-    #fig, axes = glm_pca_map(data)
-    # find cells in clusters 
-    #all_cell_per_cluster = find_cells_in_cluster(data)
-
-    # initialize the cluster centers based on ground truth
-    #avg_per_cluster_counts, avg_per_cluster_glm_pca, avg_per_cluster_pca = initialize_cluster_centers(data, all_cell_per_cluster)
-
-    # for two close by cells plot the loss for each cell from each cluster center
-    #plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_cluster_counts, avg_per_cluster_glm_pca, avg_per_cluster_pca)
-    # do kmeans++ and gaussian mixture model on glm pca data and plot the clustering
-    #kmeans_plot(data, all_cell_per_cluster)
-    # cluster + refine  
+    # cluster + refine  thread this later
     best_clustering = cluster_with_gmm(data)
-    refined = gmm_refine_negbi(data, best_clustering)
-    weights = weights_for_leiden(data, refined)
+    # thread this now
+    # data = None
+    # best_clustering = None
+    # threaded_refine(data, best_clustering)
+    #refined = gmm_refine_negbi(data, best_clustering)
+    # to do, dont do it straight away, save the result from refine and do this later
+    #weights = weights_for_leiden(data, refined)
+    gmm_refine_negbi(data, best_clustering, 0.1, 1)
     return
+
+def compute_factorial(data, best, theta, number):
+    print(number, theta)
+    return number + 2
+
+def threaded_refine(data, gmm_clusters):
+    thread_numbers = list(range(64))
+    random_theta = [random.random() * 10.0 for _value in range(0, 64)]
+    with ThreadPoolExecutor(max_workers=64) as executor:
+        results = list(
+            executor.map(
+                compute_factorial,
+                repeat(data),
+                repeat(gmm_clusters),
+                random_theta,
+                thread_numbers
+            )
+        )
+    print(results)
+    return results
+
+def gmm_refine_negbi(data, gmm_clusters, theta, thread_number):
+    n_clusters = 6
+    labels   = data["labels"]
+    counts   = data["counts"]
+    umi      = data["umi"]
+
+    # for each cluster make a stack/list whatever
+    cluster_stacks = [[] for _ in range(n_clusters)] 
+    # initialize the cluster stacks, starting seed for randomness among threads
+    cluster_stacks = find_best_cells_to_add_to_each_stack_init(cluster_stacks, gmm_clusters, counts, umi, theta, thread_number)
+
+    # find the initial cells to add to each stack
+    for run in range(0, 10):
+        cluster_stacks = find_best_cells_to_add_to_each_stack_iter(cluster_stacks, gmm_clusters, counts, umi, theta, thread_number)
+        print("thread_number: ", thread_number, "iteration", run)
+        # check if the cluster stacks corrospond to one ground truth or multiple
+        flat = [(bc, i) for i, stack in enumerate(cluster_stacks) for bc in stack]
+        gt_counts = Counter((my_cluster, labels[bc]) for bc, my_cluster in flat)
+        for i in range(len(cluster_stacks)):
+            breakdown = {gt: cnt for (cl, gt), cnt in gt_counts.items() if cl == i}
+            total     = sum(breakdown.values())
+            print(f"Cluster {i}  (n={total}): {breakdown}")
+    # calculate ari
+    barcode_to_cluster = {
+        bc: cluster_id
+        for cluster_id, cells in enumerate(cluster_stacks)
+        for bc in cells
+    }
+    common_bcs = labels.index.intersection(list(barcode_to_cluster.keys()))
+    y_true = labels.loc[common_bcs].to_numpy()
+    y_pred = np.array([barcode_to_cluster[bc] for bc in common_bcs])
+    ari = adjusted_rand_score(y_true, y_pred)
+    
+    # calculate overall score (-ve bi score)
+
+    # get the list of cells in each cluster
+    shared_bcs_arr = np.array(common_bcs)
+    # check the -ve binomial loss for the clustering
+    cc_for_stacks = initialize_cluster_centers_for_stacks(cluster_stacks, counts)
+    # for each cell calculate the own loss and the other loss
+    own_cc_loss_total, other_cc_loss_total, _, _ = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts, umi, theta=theta)
+    score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
+    print(f"ARI: {ari:.4f}, -vebi Loss: {score_loss:.3f}")
+    return cluster_stacks
 
 def weights_for_leiden(data, refined):
     weights = None
@@ -89,7 +151,7 @@ def cluster_with_gmm(data):
         # check the -ve binomial loss for the clustering
         cc_for_stacks = initialize_cluster_centers_for_stacks(gmm_clusters, counts)
         # for each cell calculate the own loss and the other loss
-        own_cc_loss_total, other_cc_loss_total, separable, not_separable_count = loss_cells_per_cc(cc_for_stacks, gmm_clusters, counts, umi)
+        own_cc_loss_total, other_cc_loss_total, separable, not_separable_count = loss_cells_per_cc(cc_for_stacks, gmm_clusters, counts, umi, theta=0.01)
         score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
         # print all the stuff
         print("Seed", seed, "ARI", ari, "score", score_loss, "separable", separable, "inseparable_count", not_separable_count)
@@ -115,38 +177,10 @@ def cluster_with_gmm(data):
     print("highest ari", highest_scoring_ari, "highest score", highest_score)
     return highest_clustering
 
-def gmm_refine_negbi(data, gmm_clusters):
-    n_clusters = 6
-    random_state = 10
-    show_gaussian_cluster_result = True
-    spatial  = data["spatial"]
-    labels   = data["labels"]
-    counts   = data["counts"]
-    glm_pca  = data["glm_pca"]
-    pca      = data["pca"]
-    umi      = data["umi"]
-
-    # for each cluster make a stack/list whatever
-    cluster_stacks = [[] for _ in range(n_clusters)] 
-    # initialize the cluster stacks
-    cluster_stacks = find_best_cells_to_add_to_each_stack_init(cluster_stacks, gmm_clusters, counts, umi, 0)
-
-    # find the initial cells to add to each stack
-    for run in range(0, 5_000):
-        cluster_stacks = find_best_cells_to_add_to_each_stack_iter(cluster_stacks, gmm_clusters, counts, umi, run + 1)
-        # check if the cluster stacks corrospond to one ground truth or multiple
-        flat = [(bc, i) for i, stack in enumerate(cluster_stacks) for bc in stack]
-        gt_counts = Counter((my_cluster, labels[bc]) for bc, my_cluster in flat)
-        for i in range(len(cluster_stacks)):
-            breakdown = {gt: cnt for (cl, gt), cnt in gt_counts.items() if cl == i}
-            total     = sum(breakdown.values())
-            print(f"Cluster {i}  (n={total}): {breakdown}")
-    return cluster_stacks
-
-def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clusters, counts, umi, run):
+def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clusters, counts, umi, theta, thread_number):
     # based on the run increase theta
     #theta = 10 / max(run / 10, 1)
-    theta = min(run / 10, 100)
+    #theta = min(run / 10, 100)
     cluster_stacks = copy.deepcopy(original_cluster_stacks)
     # assign random cell from each cluster to the stack, and get the lowest -bi loss cell and max loss with other cells
     best_score_loss = float('-inf')
@@ -157,12 +191,12 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
         # for each stack select the next cell with best score (lowest loss with stack and highest loss with other stacks)
         available = [bc for bc in gmm_clusters[cluster_stack_index] if bc not in cluster_stacks[cluster_stack_index]]
         if not available:
-            print(cluster_stack_index, "full!")
+            print("thread_number:", thread_number, "cluster_stack", cluster_stack_index, "full!!")
             continue
         # select 1000 or available
         num_cell_to_process = int(min(len(available), 1000))
         available = random.sample(available, k = num_cell_to_process)
-        print("Number of cells to process in stack", cluster_stack_index, "cells", len(available), "theta", theta)
+        print("thread_number:", thread_number, "Number of cells to process in stack", cluster_stack_index, "cells", len(available), "theta", theta)
         # go through all the available cells and choose
         not_updated = True
         best_cell = None
@@ -171,8 +205,8 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
         for cell_index, cell in enumerate(available):
             own_cc_loss_total, other_cc_loss_total, separable, preferred_cluster = loss_cells_per_cc_2(cell, cluster_stack_index, cc_for_stacks, counts, umi, theta)
             score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
-            if cell_index % int(len(available) / 5) == 0:
-                print("Current stack {} cell {} current score {} best score {}".format(cluster_stack_index, cell_index, score_loss, best_score_loss))
+            if cell_index % max(1, int(len(available) / 3)) == 0:
+                print("thread_number: {} current stack {} cell {} current score {} best score {}".format(thread_number, cluster_stack_index, cell_index, score_loss, best_score_loss))
             if score_loss > best_score_loss and separable == True:
                 best_score_loss = score_loss
                 best_cell = cell
@@ -183,8 +217,7 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
         if best_cell != None or not_updated != True:
             cluster_stacks[cluster_stack_index].append(best_cell)
         end_time = time.perf_counter()
-        print(f"Elapsed time for stack: {(end_time - start_time):.6f} seconds, inseparable cells {inseparable_count}")
-        print("Preferred Other Clusters", other_clusters_preferred)
+        print( f"thread_number: {thread_number} Elapsed time for stack: {(end_time - start_time):.6f}second inseparable cells {inseparable_count}")
     return cluster_stacks
 
 def loss_cells_per_cc_2 (cell, cluster_stack_index, cc_for_stacks, counts, umi , theta):
@@ -202,15 +235,19 @@ def loss_cells_per_cc_2 (cell, cluster_stack_index, cc_for_stacks, counts, umi ,
     other_cc_loss_total = cc_loss_array.sum() - own_cc_loss
     return (own_cc_loss, other_cc_loss_total, separable, min_index)
 
-def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clusters, counts, umi, run):
+def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clusters, counts, umi, theta, thread_number):
     cluster_stacks = copy.deepcopy(original_cluster_stacks)
     # assign random cell from each cluster to the stack, and get the lowest -bi loss cell and max loss with other cells
     best_score_loss = float('-inf')
     best_score_seed = 0
     best_cluster_stack = []
     not_updated = True
+    # start seed is based on the thread number
+    random.seed(thread_number)
+    start_seed = random.randint(1, 100_000_000)
+
     # initial stack finding, run as much as possible and get the lowest loss cells
-    for seed in range(0, 10_000):
+    for seed in range(start_seed, start_seed + 10_000):
         # set random seed
         random.seed(seed)
         for cluster_stack_index in range(0, len(cluster_stacks)):
@@ -221,7 +258,7 @@ def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clust
         # initialize cluster centers for each stack
         cc_for_stacks = initialize_cluster_centers_for_stacks(cluster_stacks, counts)
         # check the -vebinomial loss of cluster center vs cells (should be min for current stack and max for other stacks)
-        own_cc_loss_total, other_cc_loss_total, separable, not_seperable_count = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts, umi)
+        own_cc_loss_total, other_cc_loss_total, separable, not_seperable_count = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts, umi, theta)
         # print whether separable, orgin cluster loss and other cluster loss
         score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
         if score_loss > best_score_loss and separable == True:
@@ -229,16 +266,15 @@ def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clust
             best_score_seed = seed
             best_cluster_stack = copy.deepcopy(cluster_stacks)
             not_updated = False
-        if seed % 100 == 0:
-            print("own loss", own_cc_loss_total, "other loss", other_cc_loss_total, "separable", separable, "not separable count", not_seperable_count)
-            print("score", best_score_loss, "best_seed", best_score_seed, "current_seed", seed, "cells_per_stack", run + 1)
+        if seed % 1000 == 0:
+            print("thread_number: {}\tseed {}\tbest_score {}\tnSepc {}\t".format(thread_number, seed, best_score_loss, not_seperable_count))
         # go back to the original
         cluster_stacks = copy.deepcopy(original_cluster_stacks)
     if not_updated:
         print("ERROR NOT UPDATED THE STACK!!!")
     return best_cluster_stack
 
-def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts, umi):
+def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts, umi, theta):
     own_cc_loss_total = 0.0
     other_cc_loss_total = 0.0
     not_seperable_count = 0
@@ -246,23 +282,21 @@ def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts, umi):
     for cluster_index, cell_list in enumerate(cluster_stacks):
         #print(".")
         for cell in cell_list:
-            separable = True
             own_cc_loss = 0.0
             other_cc_loss_array = []
             for cc_index, cc_for_stack in enumerate(cc_for_stacks):
                 # calculate the own cc loss 
                 if cc_index == cluster_index:
-                    own_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts, theta=0.1) / umi.loc[cell]
+                    own_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts, theta) / umi.loc[cell]
                     #print("equal?", np.allclose(counts.loc[cell].values.astype(float), cc_for_stack), "own_cc_loss", own_cc_loss)
                     own_cc_loss_total += own_cc_loss
                 # calculate the other cc loss
                 else:
-                    other_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts, theta=0.1) / umi.loc[cell]
+                    other_cc_loss = negative_binomial_distance2(cell, cc_for_stack, counts, theta) / umi.loc[cell]
                     other_cc_loss_array.append(other_cc_loss)
                     other_cc_loss_total += other_cc_loss
             for other_cc_loss in other_cc_loss_array:
                 if own_cc_loss > other_cc_loss:
-                    separable = False
                     not_seperable_count += 1
     #print(loss_array)
     #print(own_cc_loss_total, other_cc_loss_total, separable)
