@@ -13,8 +13,15 @@ import random
 import copy
 from collections import Counter
 import time
-from concurrent.futures import ThreadPoolExecutor
-from itertools import repeat
+from concurrent.futures import ProcessPoolExecutor
+
+REFINED_CLUSTER_PATH = "./data/refined_clusters.csv"
+PROCESS_NUMBER = 64
+VISIUM = False # visium or slideseq
+EVAL_THETA = 0.01
+# global data variables
+DATA = None
+GMM_CLUSTERS = None
 
 def main():
     # load data
@@ -22,34 +29,51 @@ def main():
     # cluster + refine  thread this later
     best_clustering = cluster_with_gmm(data)
     # thread this now
-    # data = None
-    # best_clustering = None
-    # threaded_refine(data, best_clustering)
+    threaded_refine(data, best_clustering)
     #refined = gmm_refine_negbi(data, best_clustering)
     # to do, dont do it straight away, save the result from refine and do this later
     #weights = weights_for_leiden(data, refined)
-    gmm_refine_negbi(data, best_clustering, 0.1, 1)
+    #gmm_refine_negbi(data, best_clustering, 0.1, 1)
     return
 
-def compute_factorial(data, best, theta, number):
-    print(number, theta)
-    return number + 2
+def worker(theta, thread_number):
+    return gmm_refine_negbi(DATA, GMM_CLUSTERS, theta, thread_number)
 
 def threaded_refine(data, gmm_clusters):
-    thread_numbers = list(range(64))
-    random_theta = [random.random() * 10.0 for _value in range(0, 64)]
-    with ThreadPoolExecutor(max_workers=64) as executor:
+    # make data global for processes # only for linux
+    global DATA, GMM_CLUSTERS
+    DATA = data
+    GMM_CLUSTERS = gmm_clusters
+    number_of_threads = PROCESS_NUMBER
+    thread_numbers = list(range(number_of_threads))
+    random_theta = [random.random() * 5.0 for _ in range(0, number_of_threads)]
+    with ProcessPoolExecutor(max_workers=32) as executor:
         results = list(
             executor.map(
-                compute_factorial,
-                repeat(data),
-                repeat(gmm_clusters),
+                worker,
                 random_theta,
-                thread_numbers
+                thread_numbers,
             )
         )
-    print(results)
-    return results
+    best_score = 0.0
+    best_index = 0
+    # check ari and score of each thread
+    for index, (ari, score, cluster_stack) in enumerate(results):
+        current_theta = random_theta[index]
+        print(f"thread: {index}\tari: {ari:.3f}\tscore: {score:.3f}\ttheta {random_theta[index]:.3f}")
+        if score > best_score:
+            best_score = score
+            best_index = index
+    best_ari, best_score, best_cluster_stack = results[best_index]
+    print(f"best ari: {best_ari:.3f}\tbest score: {best_score:.3f}\ttheta {random_theta[best_index]:.3f}")
+    # save the result to csv or something
+    rows = []
+    for cluster_id, cluster in enumerate(best_cluster_stack):
+        for bc in cluster:
+            rows.append({"barcode": bc, "cluster": cluster_id})
+    df = pd.DataFrame(rows)
+    df.to_csv(REFINED_CLUSTER_PATH, index=False)
+    return
 
 def gmm_refine_negbi(data, gmm_clusters, theta, thread_number):
     n_clusters = 6
@@ -63,9 +87,9 @@ def gmm_refine_negbi(data, gmm_clusters, theta, thread_number):
     cluster_stacks = find_best_cells_to_add_to_each_stack_init(cluster_stacks, gmm_clusters, counts, umi, theta, thread_number)
 
     # find the initial cells to add to each stack
-    for run in range(0, 10):
+    for run in range(0, 5000):
         cluster_stacks = find_best_cells_to_add_to_each_stack_iter(cluster_stacks, gmm_clusters, counts, umi, theta, thread_number)
-        print("thread_number: ", thread_number, "iteration", run)
+        print(f"thread_number: {thread_number}\titeration {run}")
         # check if the cluster stacks corrospond to one ground truth or multiple
         flat = [(bc, i) for i, stack in enumerate(cluster_stacks) for bc in stack]
         gt_counts = Counter((my_cluster, labels[bc]) for bc, my_cluster in flat)
@@ -73,32 +97,30 @@ def gmm_refine_negbi(data, gmm_clusters, theta, thread_number):
             breakdown = {gt: cnt for (cl, gt), cnt in gt_counts.items() if cl == i}
             total     = sum(breakdown.values())
             print(f"Cluster {i}  (n={total}): {breakdown}")
+    # END stuff
     # calculate ari
-    barcode_to_cluster = {
-        bc: cluster_id
-        for cluster_id, cells in enumerate(cluster_stacks)
-        for bc in cells
-    }
+    barcode_to_cluster = {bc: cluster_id for cluster_id, cells in enumerate(cluster_stacks) for bc in cells}
     common_bcs = labels.index.intersection(list(barcode_to_cluster.keys()))
     y_true = labels.loc[common_bcs].to_numpy()
     y_pred = np.array([barcode_to_cluster[bc] for bc in common_bcs])
     ari = adjusted_rand_score(y_true, y_pred)
     
     # calculate overall score (-ve bi score)
-
-    # get the list of cells in each cluster
-    shared_bcs_arr = np.array(common_bcs)
     # check the -ve binomial loss for the clustering
     cc_for_stacks = initialize_cluster_centers_for_stacks(cluster_stacks, counts)
-    # for each cell calculate the own loss and the other loss
-    own_cc_loss_total, other_cc_loss_total, _, _ = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts, umi, theta=theta)
+    # for each cell calculate the own loss and the other loss, maybe use constant theta for this?
+    own_cc_loss_total, other_cc_loss_total, _, _ = loss_cells_per_cc(cc_for_stacks, cluster_stacks, counts, umi, theta=EVAL_THETA)
     score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
-    print(f"ARI: {ari:.4f}, -vebi Loss: {score_loss:.3f}")
-    return cluster_stacks
+    print(f"thread_number: {thread_number}\tfinal ARI: {ari:.4f}\tfinal -vebi Loss: {score_loss:.3f}")
+    return (ari, score_loss, cluster_stacks)
 
 def weights_for_leiden(data, refined):
     weights = None
     # make weights using refined and data (edge weight = -bi loss * spatial distance)
+    # load the best one from before
+    df = pd.read_csv("best_cluster_stack.csv")
+    n_clusters = df["cluster"].max() + 1
+    loaded_cluster_stack = [df.loc[df["cluster"] == c, "barcode"].tolist() for c in range(n_clusters)]
     return weights
 
 def run_leiden():
@@ -126,7 +148,7 @@ def cluster_with_gmm(data):
     y_true     = labels.loc[shared_bcs].values
 
     # lopp here
-    for seed in range(824, 826):
+    for seed in range(10_000, 20_000):
         # first cluster with gmm using glm pca data
         gmm = GaussianMixture(
             n_components    = n_clusters,
@@ -144,19 +166,15 @@ def cluster_with_gmm(data):
 
         # get the list of cells in each cluster
         shared_bcs_arr = np.array(shared_bcs)
-        gmm_clusters = [
-            shared_bcs_arr[y_pred == c].tolist()
-            for c in range(n_clusters)
-        ]
+        gmm_clusters = [shared_bcs_arr[y_pred == c].tolist() for c in range(n_clusters)]
         # check the -ve binomial loss for the clustering
         cc_for_stacks = initialize_cluster_centers_for_stacks(gmm_clusters, counts)
-        # for each cell calculate the own loss and the other loss
-        own_cc_loss_total, other_cc_loss_total, separable, not_separable_count = loss_cells_per_cc(cc_for_stacks, gmm_clusters, counts, umi, theta=0.01)
+        # for each cell calculate the own loss and the other loss, theta 1 for consistency
+        own_cc_loss_total, other_cc_loss_total, separable, not_separable_count = loss_cells_per_cc(cc_for_stacks, gmm_clusters, counts, umi, theta=EVAL_THETA)
         score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
         # print all the stuff
-        print("Seed", seed, "ARI", ari, "score", score_loss, "separable", separable, "inseparable_count", not_separable_count)
+        print(f"seed: {seed}\tARI: {ari}\tscore: {score_loss}\tnSepc: {not_separable_count}")
         # save the best
-
         if score_loss > highest_score:
             highest_clustering = copy.deepcopy(gmm_clusters)
             highest_score = score_loss
@@ -173,8 +191,8 @@ def cluster_with_gmm(data):
                 print(f"Cluster {cluster_id} (n={total})")
                 for gt, cnt in sorted(breakdown.items(), key=lambda x: x[1], reverse=True):
                     print(f"    {gt}: {cnt}")
-            print("=========================================")
-    print("highest ari", highest_scoring_ari, "highest score", highest_score)
+            print(f"=========================================")
+    print(f"highest_ari: {highest_scoring_ari}\thighest_score: {highest_score}")
     return highest_clustering
 
 def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clusters, counts, umi, theta, thread_number):
@@ -191,12 +209,12 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
         # for each stack select the next cell with best score (lowest loss with stack and highest loss with other stacks)
         available = [bc for bc in gmm_clusters[cluster_stack_index] if bc not in cluster_stacks[cluster_stack_index]]
         if not available:
-            print("thread_number:", thread_number, "cluster_stack", cluster_stack_index, "full!!")
+            print(f"thread_number: {thread_number}\tcluster_stack {cluster_stack_index} Full!!!")
             continue
         # select 1000 or available
         num_cell_to_process = int(min(len(available), 1000))
         available = random.sample(available, k = num_cell_to_process)
-        print("thread_number:", thread_number, "Number of cells to process in stack", cluster_stack_index, "cells", len(available), "theta", theta)
+        print(f"thread_number: {thread_number}\ttheta {theta}\tcells in stack {cluster_stack_index}: {len(available)}")
         # go through all the available cells and choose
         not_updated = True
         best_cell = None
@@ -206,7 +224,7 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
             own_cc_loss_total, other_cc_loss_total, separable, preferred_cluster = loss_cells_per_cc_2(cell, cluster_stack_index, cc_for_stacks, counts, umi, theta)
             score_loss = other_cc_loss_total / (own_cc_loss_total + 1e-8)
             if cell_index % max(1, int(len(available) / 3)) == 0:
-                print("thread_number: {} current stack {} cell {} current score {} best score {}".format(thread_number, cluster_stack_index, cell_index, score_loss, best_score_loss))
+                print(f"thread_number: {thread_number}\tstack {cluster_stack_index}\tcell {cell_index}\tcurrent score {score_loss:.3f}\tbest score {best_score_loss:.3f}")
             if score_loss > best_score_loss and separable == True:
                 best_score_loss = score_loss
                 best_cell = cell
@@ -217,7 +235,7 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
         if best_cell != None or not_updated != True:
             cluster_stacks[cluster_stack_index].append(best_cell)
         end_time = time.perf_counter()
-        print( f"thread_number: {thread_number} Elapsed time for stack: {(end_time - start_time):.6f}second inseparable cells {inseparable_count}")
+        print(f"thread_number: {thread_number}\ttime for stack: {(end_time - start_time):.3f}s\tnSepc {inseparable_count}")
     return cluster_stacks
 
 def loss_cells_per_cc_2 (cell, cluster_stack_index, cc_for_stacks, counts, umi , theta):
@@ -245,7 +263,6 @@ def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clust
     # start seed is based on the thread number
     random.seed(thread_number)
     start_seed = random.randint(1, 100_000_000)
-
     # initial stack finding, run as much as possible and get the lowest loss cells
     for seed in range(start_seed, start_seed + 10_000):
         # set random seed
@@ -271,7 +288,7 @@ def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clust
         # go back to the original
         cluster_stacks = copy.deepcopy(original_cluster_stacks)
     if not_updated:
-        print("ERROR NOT UPDATED THE STACK!!!")
+        print(f"ERROR NOT UPDATED THE STACK!!!")
     return best_cluster_stack
 
 def loss_cells_per_cc (cc_for_stacks, cluster_stacks, counts, umi, theta):
@@ -649,7 +666,10 @@ def poisson_loss(x, lam, eps=1e-8):
     return np.sum(lam - x * np.log(lam))
 
 def load_data():
-    data_type = "slideseq"
+    if VISIUM == True:
+        data_type = "visium"
+    else:
+        data_type = "slideseq"
     # visium paths 
     visium_count = "./data/visium_count.csv"
     visium_coor = "./data/visium_coor.csv"
