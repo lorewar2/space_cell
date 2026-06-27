@@ -10,16 +10,15 @@ from lightning.pytorch import seed_everything
 
 seed_everything(12345)
 scvi.settings.seed = 12345
-COUNT_FILE = "./data/spatial_data.csv"
-COOR_FILE = "./data/spatial_metadata.csv"
-GLM_FILE = "./data/cerebellum_glm.csv"
+COUNT_FILE = "./data/visium_count.csv"
+COOR_FILE = "./data/visium_coor.csv"
 
 def main():
     # read counts
     adata_spatial = sc.read_csv(COUNT_FILE)
     adata_spatial = adata_spatial.T
     # read coordinates and load them to adata
-    fov_df = pd.read_csv(COOR_FILE, usecols=[0, 35, 36])
+    fov_df = pd.read_csv(COOR_FILE, usecols=[0, 4, 5])
     fov_df.columns = ["cell_id", "x", "y"]
 
     fov_df = fov_df.set_index("cell_id")
@@ -59,14 +58,14 @@ def main():
     autok.fit(adata_spatial, use_rep='X_cellcharter')
     cc.pl.autok_stability(autok)
     # save stability plot here
-    plt.savefig("cellcharter_stab.png", dpi=300, bbox_inches="tight")
+    plt.savefig("cellcharter_stab_visi.png", dpi=300, bbox_inches="tight")
     plt.close()
     adata_spatial.obs['cluster_cellcharter'] = autok.predict(adata_spatial, use_rep='X_cellcharter')
     sq.pl.spatial_scatter(
         adata_spatial,
         color=['cluster_cellcharter'],
         library_key='sample',
-        size=30,
+        size=60,
         img=None,
         spatial_key='spatial_fov',
         palette='Set2',
@@ -75,10 +74,18 @@ def main():
         library_id=['FOV1']
     )
     # save clustered
-    plt.savefig("cellcharter_clus.png", dpi=300, bbox_inches="tight")
+    plt.savefig("cellcharter_clus_visi.png", dpi=300, bbox_inches="tight")
     plt.close()
+    # save to csv
+    df = pd.DataFrame({
+        "cell_id": adata_spatial.obs_names,
+        "x": adata_spatial.obsm["spatial_fov"][:, 0],
+        "y": adata_spatial.obsm["spatial_fov"][:, 1],
+        "cluster": adata_spatial.obs["cluster_cellcharter"].values
+    })
+
+    df.to_csv("cell_clusters_visi.csv", index=False)
     return
 
 if __name__ == '__main__':
     main()
-

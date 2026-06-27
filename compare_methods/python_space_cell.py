@@ -14,6 +14,8 @@ import copy
 from collections import Counter
 import time
 from concurrent.futures import ProcessPoolExecutor
+import igraph as ig
+import leidenalg
 
 REFINED_CLUSTER_PATH = "./data/refined_clusters.csv"
 PROCESS_NUMBER = 64
@@ -27,14 +29,160 @@ def main():
     # load data
     data = load_data()
     # cluster + refine  thread this later
-    best_clustering = cluster_with_gmm(data)
+    #best_clustering = cluster_with_gmm(data)
     # thread this now
-    threaded_refine(data, best_clustering)
+    #threaded_refine(data, best_clustering)
     #refined = gmm_refine_negbi(data, best_clustering)
     # to do, dont do it straight away, save the result from refine and do this later
-    #weights = weights_for_leiden(data, refined)
     #gmm_refine_negbi(data, best_clustering, 0.1, 1)
+    weights = graph_for_leiden(data)
+    run_leiden(data, weights)
     return
+
+def graph_for_leiden(data):
+    spatial  = data["spatial"]
+    counts   = data["counts"]
+
+    # load the best refined clustering from before
+    df = pd.read_csv("./data/refined_clusters.csv")
+    n_clusters = df["cluster"].max() + 1
+    loaded_cluster_stack = [
+        df.loc[df["cluster"] == c, "barcode"].tolist()
+        for c in range(n_clusters)
+    ]
+
+    # set assigned and unassigned
+    assigned_barcodes = set()
+    bc_to_cluster     = {}
+    for c, stack in enumerate(loaded_cluster_stack):
+        for bc in stack:
+            assigned_barcodes.add(bc)
+            bc_to_cluster[bc] = c
+
+    all_barcodes      = list(spatial.index)
+    unassigned_barcodes = [bc for bc in all_barcodes if bc not in assigned_barcodes]
+
+    print(f"Assigned cells:   {len(assigned_barcodes)}")
+    print(f"Unassigned cells: {len(unassigned_barcodes)}")
+
+    # node id barcode, edge weight loss 
+    node_ids   = all_barcodes
+    node_index = {bc: i for i, bc in enumerate(node_ids)}
+
+    coords = {bc: spatial.loc[bc, ["x", "y"]].values.astype(float) for bc in all_barcodes}
+
+    edges   = []
+    weights = []
+
+    # high weight to anchor within-cluster assigned cells together
+    HIGH_WEIGHT = 1e6
+
+    # within cluster assigned high weight
+    for stack in loaded_cluster_stack:
+        for i in range(len(stack)):
+            for j in range(i + 1, len(stack)):
+                bc1, bc2 = stack[i], stack[j]
+                edges.append((node_index[bc1], node_index[bc2]))
+                weights.append(HIGH_WEIGHT)
+
+    # unassigned connect
+    assigned_list = list(assigned_barcodes)
+
+    for u_bc in unassigned_barcodes:
+        u_coord = coords[u_bc]
+        for a_bc in assigned_list:
+            nb_loss   = negative_binomial_distance3(u_bc, a_bc, counts, theta=5)
+            spat_dist = float(np.linalg.norm(u_coord - coords[a_bc]))
+            raw       = nb_loss * spat_dist          # combined dissimilarity
+            sim       = 1.0 / (raw + 1e-8)           # invert → similarity
+            edges.append((node_index[u_bc], node_index[a_bc]))
+            weights.append(float(sim))
+    weights = [float(w) for w in weights]
+
+    return {
+        "edges":                edges,
+        "weights":              weights,
+        "node_ids":             node_ids,
+        "node_index":           node_index,
+        "bc_to_cluster":        bc_to_cluster,
+        "loaded_cluster_stack": loaded_cluster_stack,
+        "n_clusters":           n_clusters,
+    }
+
+def run_leiden(data, weights):
+    spatial  = data["spatial"]
+    labels   = data["labels"]
+    edges      = weights["edges"]
+    edge_w     = weights["weights"]
+    node_ids   = weights["node_ids"]
+    node_index = weights["node_index"]
+
+    # build graph
+    g = ig.Graph(n=len(node_ids), edges=edges, directed=False)
+    g.vs["name"]   = node_ids
+    g.es["weight"] = edge_w
+    print(g.summary())
+
+    # leiden (fine tune the damn resolution)
+    part = leidenalg.find_partition(
+        g,
+        leidenalg.RBConfigurationVertexPartition,
+        weights=edge_w,
+        resolution_parameter=1.0,
+    )
+    membership = part.membership
+    g.vs["community"] = membership
+
+    pred_series = pd.Series(
+        {g.vs[node_index[bc]]["name"]: g.vs[node_index[bc]]["community"]
+         for bc in node_ids},
+        name="community",
+    )
+
+    # ARI
+    shared_bcs = [bc for bc in node_ids if bc in labels.index]
+    y_true     = labels.loc[shared_bcs].values
+    y_pred     = pred_series.loc[shared_bcs].values
+
+    ari = adjusted_rand_score(y_true, y_pred)
+    print(f"Leiden communities: {len(set(membership))}")
+    print(f"ARI = {ari:.4f}")
+
+    # PLOT AND STUFF
+    gt_unique = sorted(labels.unique())
+    gt_cmap   = plt.cm.get_cmap("tab10", len(gt_unique))
+    gt_colors = {v: gt_cmap(i) for i, v in enumerate(gt_unique)}
+
+    comm_unique = sorted(set(membership))
+    cm_cmap     = plt.cm.get_cmap("gist_rainbow", len(comm_unique))
+    cm_colors   = {v: cm_cmap(i) for i, v in enumerate(comm_unique)}
+
+    coords = spatial.loc[shared_bcs, ["x", "y"]].values
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    axes[0].scatter(coords[:, 0], coords[:, 1],
+                    c=[gt_colors[v] for v in y_true],
+                    s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
+    axes[0].set_title("Ground truth\n(spatial view)", fontsize=11)
+    axes[0].set_xlabel("x"); axes[0].set_ylabel("y")
+    axes[0].set_aspect("equal")
+    axes[0].legend(handles=[mpatches.Patch(color=gt_colors[v], label=v)
+                            for v in gt_unique], fontsize=7, loc="upper right")
+
+    axes[1].scatter(coords[:, 0], coords[:, 1],
+                    c=[cm_colors[v] for v in y_pred],
+                    s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
+    axes[1].set_title(f"Leiden communities (n={len(comm_unique)})\n"
+                      f"ARI = {ari:.3f}", fontsize=11)
+    axes[1].set_xlabel("x"); axes[1].set_ylabel("y")
+    axes[1].set_aspect("equal")
+
+    plt.suptitle("SpaceCell Leiden assignment vs ground truth", fontsize=13)
+    plt.tight_layout()
+    plt.savefig("leiden_final.png", dpi=150, bbox_inches="tight")
+    plt.show()
+    return pred_series, ari
 
 def worker(theta, thread_number):
     return gmm_refine_negbi(DATA, GMM_CLUSTERS, theta, thread_number)
@@ -114,23 +262,6 @@ def gmm_refine_negbi(data, gmm_clusters, theta, thread_number):
     print(f"thread_number: {thread_number}\tfinal ARI: {ari:.4f}\tfinal -vebi Loss: {score_loss:.3f}")
     return (ari, score_loss, cluster_stacks)
 
-def weights_for_leiden(data, refined):
-    weights = None
-    # make weights using refined and data (edge weight = -bi loss * spatial distance)
-    # load the best one from before
-    df = pd.read_csv("best_cluster_stack.csv")
-    n_clusters = df["cluster"].max() + 1
-    loaded_cluster_stack = [df.loc[df["cluster"] == c, "barcode"].tolist() for c in range(n_clusters)]
-    return weights
-
-def run_leiden():
-    # make the graph using the weighs
-
-    # run leiden
-
-    # display results
-    return
-
 def cluster_with_gmm(data):
     highest_scoring_ari = 0.0
     highest_score = float("-inf")
@@ -148,7 +279,7 @@ def cluster_with_gmm(data):
     y_true     = labels.loc[shared_bcs].values
 
     # lopp here
-    for seed in range(10_000, 20_000):
+    for seed in range(8753, 8755):
         # first cluster with gmm using glm pca data
         gmm = GaussianMixture(
             n_components    = n_clusters,
@@ -337,6 +468,12 @@ def negative_binomial_distance2(bc, avg, counts, theta=5):
     eps = 1e-8
     y   = counts.loc[bc].values.astype(float)
     return nll(avg, y, theta, eps)
+
+def negative_binomial_distance3(bc1, bc2, counts, theta=5):
+    eps = 1e-8
+    y1 = counts.loc[bc1].values.astype(float)
+    y2 = counts.loc[bc2].values.astype(float)
+    return nll(y1, y2, theta, eps)
 
 def nll(mu, y, theta, eps = 1e-8):
     mu = np.maximum(mu, eps)
