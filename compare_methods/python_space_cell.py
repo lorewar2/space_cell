@@ -36,10 +36,84 @@ def main():
     #refined = gmm_refine_negbi(data, best_clustering)
     # to do, dont do it straight away, save the result from refine and do this later
     #gmm_refine_negbi(data, best_clustering, 0.1, 1)
-    weights = graph_for_leiden(data, mode="knn", k=10)
+    #weights = graph_for_leiden(data, mode="knn", k=10)
     #weights = graph_for_leiden(data, mode="radius", radius=200)
-    #run_leiden(data, weights)
+    run_leiden(data)
     return
+
+def run_leiden(data):
+    spatial = data["spatial"]
+    labels  = data["labels"]
+
+    # load the graph from the .graphml file
+    g = ig.Graph.Read_GraphML("./data/knn_10_graph.graphml")
+    print(f"Loaded graph")
+    print(g.summary())
+
+    node_ids   = g.vs["name"]
+    node_index = {bc: i for i, bc in enumerate(node_ids)}
+    edge_w     = g.es["weight"]
+
+    # run Leiden
+    part = leidenalg.find_partition(
+        g,
+        leidenalg.RBConfigurationVertexPartition,
+        weights=edge_w,
+        resolution_parameter=0.1,
+    )
+    membership = part.membership
+    g.vs["community"] = membership
+
+    pred_series = pd.Series(
+        {g.vs[node_index[bc]]["name"]: g.vs[node_index[bc]]["community"]
+         for bc in node_ids},
+        name="community",
+    )
+
+    # ARI / F1 against ground trut
+    shared_bcs = [bc for bc in node_ids if bc in labels.index]
+    y_true     = labels.loc[shared_bcs].values
+    y_pred     = pred_series.loc[shared_bcs].values
+
+    ari = adjusted_rand_score(y_true, y_pred)
+    print(f"Leiden communities: {len(set(membership))}")
+    print(f"ARI = {ari:.4f}")
+
+    # spatial scatter: ground truth vs Leiden communities 
+    gt_unique = sorted(labels.unique())
+    gt_cmap   = plt.cm.get_cmap("tab10", len(gt_unique))
+    gt_colors = {v: gt_cmap(i) for i, v in enumerate(gt_unique)}
+
+    comm_unique = sorted(set(membership))
+    cm_cmap     = plt.cm.get_cmap("gist_rainbow", len(comm_unique))
+    cm_colors   = {v: cm_cmap(i) for i, v in enumerate(comm_unique)}
+
+    coords = spatial.loc[shared_bcs, ["x", "y"]].values
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    axes[0].scatter(coords[:, 0], coords[:, 1],
+                    c=[gt_colors[v] for v in y_true],
+                    s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
+    axes[0].set_title("Ground truth\n(spatial view)", fontsize=11)
+    axes[0].set_xlabel("x"); axes[0].set_ylabel("y")
+    axes[0].set_aspect("equal")
+    axes[0].legend(handles=[mpatches.Patch(color=gt_colors[v], label=v)
+                            for v in gt_unique], fontsize=7, loc="upper right")
+
+    axes[1].scatter(coords[:, 0], coords[:, 1],
+                    c=[cm_colors[v] for v in y_pred],
+                    s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
+    axes[1].set_title(f"Leiden communities (n={len(comm_unique)})\n"
+                      f"ARI = {ari:.3f}", fontsize=11)
+    axes[1].set_xlabel("x"); axes[1].set_ylabel("y")
+    axes[1].set_aspect("equal")
+
+    plt.suptitle("SpaceCell Leiden assignment vs ground truth", fontsize=13)
+    plt.tight_layout()
+    plt.savefig("leiden_final.png", dpi=150, bbox_inches="tight")
+    plt.show()
+    return pred_series, ari
 
 def graph_for_leiden(data, mode="knn", k=10, radius=None, save_path="./data/spacecell_graph.graphml"):
     spatial  = data["spatial"]
@@ -137,88 +211,6 @@ def graph_for_leiden(data, mode="knn", k=10, radius=None, save_path="./data/spac
         "loaded_cluster_stack": loaded_cluster_stack,
         "n_clusters":           n_clusters,
     }
-
-def run_leiden(data, weights):
-    spatial  = data["spatial"]
-    labels   = data["labels"]
-    edges      = weights["edges"]
-    edge_w     = weights["weights"]
-    node_ids   = weights["node_ids"]
-    node_index = weights["node_index"]
-
-    # build graph
-    g = ig.Graph.Read_GraphML("cere.graphml")
-    print(g.summary())
-
-    # node labels
-    if "label" in g.vs.attributes():
-        node_labels = g.vs["label"]
-    else:
-        node_labels = [str(v.index) for v in g.vs]
-
-    # weights
-    weights = g.es["weight"] if "weight" in g.es.attributes() else None
-
-    # Leiden partition
-    part = leidenalg.find_partition(
-        g,
-        leidenalg.RBConfigurationVertexPartition,
-        weights=weights,
-        resolution_parameter=0.0000001
-    )
-    membership = part.membership
-    g.vs["community"] = membership
-
-    pred_series = pd.Series(
-        {g.vs[node_index[bc]]["name"]: g.vs[node_index[bc]]["community"]
-         for bc in node_ids},
-        name="community",
-    )
-
-    # ARI
-    shared_bcs = [bc for bc in node_ids if bc in labels.index]
-    y_true     = labels.loc[shared_bcs].values
-    y_pred     = pred_series.loc[shared_bcs].values
-
-    ari = adjusted_rand_score(y_true, y_pred)
-    print(f"Leiden communities: {len(set(membership))}")
-    print(f"ARI = {ari:.4f}")
-
-    # PLOT AND STUFF
-    gt_unique = sorted(labels.unique())
-    gt_cmap   = plt.cm.get_cmap("tab10", len(gt_unique))
-    gt_colors = {v: gt_cmap(i) for i, v in enumerate(gt_unique)}
-
-    comm_unique = sorted(set(membership))
-    cm_cmap     = plt.cm.get_cmap("gist_rainbow", len(comm_unique))
-    cm_colors   = {v: cm_cmap(i) for i, v in enumerate(comm_unique)}
-
-    coords = spatial.loc[shared_bcs, ["x", "y"]].values
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-
-    axes[0].scatter(coords[:, 0], coords[:, 1],
-                    c=[gt_colors[v] for v in y_true],
-                    s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
-    axes[0].set_title("Ground truth\n(spatial view)", fontsize=11)
-    axes[0].set_xlabel("x"); axes[0].set_ylabel("y")
-    axes[0].set_aspect("equal")
-    axes[0].legend(handles=[mpatches.Patch(color=gt_colors[v], label=v)
-                            for v in gt_unique], fontsize=7, loc="upper right")
-
-    axes[1].scatter(coords[:, 0], coords[:, 1],
-                    c=[cm_colors[v] for v in y_pred],
-                    s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
-    axes[1].set_title(f"Leiden communities (n={len(comm_unique)})\n"
-                      f"ARI = {ari:.3f}", fontsize=11)
-    axes[1].set_xlabel("x"); axes[1].set_ylabel("y")
-    axes[1].set_aspect("equal")
-
-    plt.suptitle("SpaceCell Leiden assignment vs ground truth", fontsize=13)
-    plt.tight_layout()
-    plt.savefig("leiden_final.png", dpi=150, bbox_inches="tight")
-    plt.show()
-    return pred_series, ari
 
 def worker(theta, thread_number):
     return gmm_refine_negbi(DATA, GMM_CLUSTERS, theta, thread_number)
