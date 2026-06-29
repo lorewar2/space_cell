@@ -16,6 +16,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 import igraph as ig
 import leidenalg
+from scipy.spatial import cKDTree
 
 REFINED_CLUSTER_PATH = "./data/refined_clusters.csv"
 PROCESS_NUMBER = 64
@@ -35,15 +36,17 @@ def main():
     #refined = gmm_refine_negbi(data, best_clustering)
     # to do, dont do it straight away, save the result from refine and do this later
     #gmm_refine_negbi(data, best_clustering, 0.1, 1)
-    weights = graph_for_leiden(data)
-    run_leiden(data, weights)
+    weights = graph_for_leiden(data, mode="knn", k=10)
+    #weights = graph_for_leiden(data, mode="radius", radius=200)
+    #run_leiden(data, weights)
     return
 
-def graph_for_leiden(data):
+def graph_for_leiden(data, mode="knn", k=10, radius=None, save_path="./data/spacecell_graph.graphml"):
     spatial  = data["spatial"]
+    labels   = data["labels"]
     counts   = data["counts"]
 
-    # load the best refined clustering from before
+    #  load the best refined clustering
     df = pd.read_csv("./data/refined_clusters.csv")
     n_clusters = df["cluster"].max() + 1
     loaded_cluster_stack = [
@@ -51,7 +54,6 @@ def graph_for_leiden(data):
         for c in range(n_clusters)
     ]
 
-    # set assigned and unassigned
     assigned_barcodes = set()
     bc_to_cluster     = {}
     for c, stack in enumerate(loaded_cluster_stack):
@@ -59,49 +61,76 @@ def graph_for_leiden(data):
             assigned_barcodes.add(bc)
             bc_to_cluster[bc] = c
 
-    all_barcodes      = list(spatial.index)
+    all_barcodes        = list(spatial.index)
     unassigned_barcodes = [bc for bc in all_barcodes if bc not in assigned_barcodes]
 
     print(f"Assigned cells:   {len(assigned_barcodes)}")
     print(f"Unassigned cells: {len(unassigned_barcodes)}")
+    print(f"Connectivity mode: {mode}  (k={k}, radius={radius})")
 
-    # node id barcode, edge weight loss 
     node_ids   = all_barcodes
     node_index = {bc: i for i, bc in enumerate(node_ids)}
-
-    coords = {bc: spatial.loc[bc, ["x", "y"]].values.astype(float) for bc in all_barcodes}
+    coords     = {bc: spatial.loc[bc, ["x", "y"]].values.astype(float) for bc in all_barcodes}
 
     edges   = []
     weights = []
-
-    # high weight to anchor within-cluster assigned cells together
     HIGH_WEIGHT = 1e6
 
-    # within cluster assigned high weight
+    # within-cluster anchor edges (very high weight)
     for stack in loaded_cluster_stack:
         for i in range(len(stack)):
             for j in range(i + 1, len(stack)):
-                bc1, bc2 = stack[i], stack[j]
-                edges.append((node_index[bc1], node_index[bc2]))
+                edges.append((node_index[stack[i]], node_index[stack[j]]))
                 weights.append(HIGH_WEIGHT)
 
-    # unassigned connect
-    assigned_list = list(assigned_barcodes)
+    # unassigned → nearby assigned edge
+    assigned_list   = list(assigned_barcodes)
+    assigned_coords = np.array([coords[bc] for bc in assigned_list])
+    tree            = cKDTree(assigned_coords)
 
     for u_bc in unassigned_barcodes:
         u_coord = coords[u_bc]
-        for a_bc in assigned_list:
+
+        if mode == "knn":
+            # k nearest assigned cells
+            kq = min(k, len(assigned_list))
+            dists, idxs = tree.query(u_coord, k=kq)
+            if kq == 1:                      # tree.query returns scalars for k=1
+                idxs, dists = [idxs], [dists]
+            neighbour_pairs = zip(np.atleast_1d(idxs), np.atleast_1d(dists))
+
+        elif mode == "radius":
+            if radius is None:
+                raise ValueError("radius must be set when mode='radius'")
+            idxs = tree.query_ball_point(u_coord, r=radius)
+            dists = [np.linalg.norm(u_coord - assigned_coords[j]) for j in idxs]
+            neighbour_pairs = zip(idxs, dists)
+
+        else:
+            raise ValueError("mode must be 'knn' or 'radius'")
+
+        for j, spat_dist in neighbour_pairs:
+            a_bc      = assigned_list[j]
             nb_loss   = negative_binomial_distance3(u_bc, a_bc, counts, theta=5)
-            spat_dist = float(np.linalg.norm(u_coord - coords[a_bc]))
-            raw       = nb_loss * spat_dist          # combined dissimilarity
-            sim       = 1.0 / (raw + 1e-8)           # invert → similarity
+            raw       = nb_loss * float(spat_dist)     # combined dissimilarity
+            sim       = 1.0 / (raw + 1e-8)             # invert → similarity
             edges.append((node_index[u_bc], node_index[a_bc]))
             weights.append(float(sim))
+
     weights = [float(w) for w in weights]
 
+    #  build graph and save as .graphml
+    g = ig.Graph(n=len(node_ids), edges=edges, directed=False)
+    g.vs["name"]      = node_ids
+    g.vs["assigned"]  = [bc in assigned_barcodes for bc in node_ids]
+    g.vs["init_cluster"] = [bc_to_cluster.get(bc, -1) for bc in node_ids]
+    g.es["weight"]    = weights
+
+    g.write_graphml(save_path)
+    print(f"Graph saved to {save_path}  ({g.vcount()} nodes, {g.ecount()} edges)")
+
     return {
-        "edges":                edges,
-        "weights":              weights,
+        "graph":                g,
         "node_ids":             node_ids,
         "node_index":           node_index,
         "bc_to_cluster":        bc_to_cluster,
@@ -118,17 +147,24 @@ def run_leiden(data, weights):
     node_index = weights["node_index"]
 
     # build graph
-    g = ig.Graph(n=len(node_ids), edges=edges, directed=False)
-    g.vs["name"]   = node_ids
-    g.es["weight"] = edge_w
+    g = ig.Graph.Read_GraphML("cere.graphml")
     print(g.summary())
 
-    # leiden (fine tune the damn resolution)
+    # node labels
+    if "label" in g.vs.attributes():
+        node_labels = g.vs["label"]
+    else:
+        node_labels = [str(v.index) for v in g.vs]
+
+    # weights
+    weights = g.es["weight"] if "weight" in g.es.attributes() else None
+
+    # Leiden partition
     part = leidenalg.find_partition(
         g,
         leidenalg.RBConfigurationVertexPartition,
-        weights=edge_w,
-        resolution_parameter=1.0,
+        weights=weights,
+        resolution_parameter=0.0000001
     )
     membership = part.membership
     g.vs["community"] = membership
