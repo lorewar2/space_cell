@@ -20,8 +20,9 @@ from scipy.spatial import cKDTree
 
 REFINED_CLUSTER_PATH = "./data/refined_clusters.csv"
 PROCESS_NUMBER = 64
-VISIUM = False # visium or slideseq
+VISIUM = True # visium or slideseq
 EVAL_THETA = 0.01
+NUM_CLUS = 7
 # global data variables
 DATA = None
 GMM_CLUSTERS = None
@@ -30,15 +31,16 @@ def main():
     # load data
     data = load_data()
     # cluster + refine  thread this later
-    #best_clustering = cluster_with_gmm(data)
+    best_clustering = cluster_with_gmm(data)
     # thread this now
-    #threaded_refine(data, best_clustering)
+    threaded_refine(data, best_clustering)
     #refined = gmm_refine_negbi(data, best_clustering)
     # to do, dont do it straight away, save the result from refine and do this later
     #gmm_refine_negbi(data, best_clustering, 0.1, 1)
-    #weights = graph_for_leiden(data, mode="knn", k=10)
+    #weights = graph_for_leiden(data, mode="knn", k=30, save_path="knn_30_graph.graphml")
     #weights = graph_for_leiden(data, mode="radius", radius=200)
-    run_leiden(data)
+    #run_leiden(data)
+    #calculate_cell_charter_ari_and_plot(data)
     return
 
 def run_leiden(data):
@@ -46,7 +48,7 @@ def run_leiden(data):
     labels  = data["labels"]
 
     # load the graph from the .graphml file
-    g = ig.Graph.Read_GraphML("./data/knn_10_graph.graphml")
+    g = ig.Graph.Read_GraphML("./data/knn_30_graph.graphml")
     print(f"Loaded graph")
     print(g.summary())
 
@@ -59,7 +61,7 @@ def run_leiden(data):
         g,
         leidenalg.RBConfigurationVertexPartition,
         weights=edge_w,
-        resolution_parameter=0.1,
+        resolution_parameter=0.05,
     )
     membership = part.membership
     g.vs["community"] = membership
@@ -252,7 +254,7 @@ def threaded_refine(data, gmm_clusters):
     return
 
 def gmm_refine_negbi(data, gmm_clusters, theta, thread_number):
-    n_clusters = 6
+    n_clusters = NUM_CLUS
     labels   = data["labels"]
     counts   = data["counts"]
     umi      = data["umi"]
@@ -263,7 +265,7 @@ def gmm_refine_negbi(data, gmm_clusters, theta, thread_number):
     cluster_stacks = find_best_cells_to_add_to_each_stack_init(cluster_stacks, gmm_clusters, counts, umi, theta, thread_number)
 
     # find the initial cells to add to each stack
-    for run in range(0, 5000):
+    for run in range(0, 1000):
         cluster_stacks = find_best_cells_to_add_to_each_stack_iter(cluster_stacks, gmm_clusters, counts, umi, theta, thread_number)
         print(f"thread_number: {thread_number}\titeration {run}")
         # check if the cluster stacks corrospond to one ground truth or multiple
@@ -294,7 +296,7 @@ def cluster_with_gmm(data):
     highest_scoring_ari = 0.0
     highest_score = float("-inf")
     highest_clustering = None
-    n_clusters = 6
+    n_clusters = NUM_CLUS
     show_gaussian_cluster_result = True
     labels   = data["labels"]
     counts   = data["counts"]
@@ -307,7 +309,7 @@ def cluster_with_gmm(data):
     y_true     = labels.loc[shared_bcs].values
 
     # lopp here
-    for seed in range(8753, 8755):
+    for seed in range(7, 8):
         # first cluster with gmm using glm pca data
         gmm = GaussianMixture(
             n_components    = n_clusters,
@@ -829,6 +831,62 @@ def find_cells_in_cluster(data):
 def poisson_loss(x, lam, eps=1e-8):
     lam = np.clip(lam, eps, None)
     return np.sum(lam - x * np.log(lam))
+
+def calculate_cell_charter_ari_and_plot(data, cellcharter_path="./cell_clusters_cere2.csv"):
+    spatial = data["spatial"]
+    labels  = data["labels"]
+
+    # load CellCharter results
+    cc_df = pd.read_csv(cellcharter_path)
+    cc_pred = cc_df.set_index("cell_id")["cluster"]
+
+    # align to cells that have both a prediction and ground truth
+    shared_bcs = [bc for bc in cc_pred.index if bc in labels.index]
+    y_true = labels.loc[shared_bcs].values
+    y_pred = cc_pred.loc[shared_bcs].values
+
+    # ARI 
+    ari = adjusted_rand_score(y_true, y_pred)
+    print(f"CellCharter communities: {len(set(y_pred))}")
+    print(f"ARI = {ari:.4f}")
+
+    # colour maps (same scheme as run_leiden)
+    gt_unique = sorted(labels.unique())
+    gt_cmap   = plt.cm.get_cmap("tab10", len(gt_unique))
+    gt_colors = {v: gt_cmap(i) for i, v in enumerate(gt_unique)}
+
+    comm_unique = sorted(set(y_pred))
+    cm_cmap     = plt.cm.get_cmap("gist_rainbow", len(comm_unique))
+    cm_colors   = {v: cm_cmap(i) for i, v in enumerate(comm_unique)}
+
+    coords = spatial.loc[shared_bcs, ["x", "y"]].values
+
+    # plot: ground truth vs CellCharter
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    axes[0].scatter(coords[:, 0], coords[:, 1],
+                    c=[gt_colors[v] for v in y_true],
+                    s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
+    axes[0].set_title("Ground truth\n(spatial view)", fontsize=11)
+    axes[0].set_xlabel("x"); axes[0].set_ylabel("y")
+    axes[0].set_aspect("equal")
+    axes[0].legend(handles=[mpatches.Patch(color=gt_colors[v], label=v)
+                            for v in gt_unique], fontsize=7, loc="upper right")
+
+    axes[1].scatter(coords[:, 0], coords[:, 1],
+                    c=[cm_colors[v] for v in y_pred],
+                    s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
+    axes[1].set_title(f"CellCharter clusters (n={len(comm_unique)})\n"
+                      f"ARI = {ari:.3f}", fontsize=11)
+    axes[1].set_xlabel("x"); axes[1].set_ylabel("y")
+    axes[1].set_aspect("equal")
+
+    plt.suptitle("CellCharter assignment vs ground truth", fontsize=13)
+    plt.tight_layout()
+    plt.savefig("cellcharter_final.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+    return cc_pred, ari
 
 def load_data():
     if VISIUM == True:
