@@ -15,16 +15,11 @@ def main():
 
 def glm_pca(output_file_path, penalty):
     # load the data
-    counts_df = pd.read_csv("./data/spatial_data.csv", index_col=0)  # genes as rows, cell_ids as columns
+    counts_df = pd.read_csv("./151673_seed1_polished_all.csv", index_col=0)  # genes as rows, cell_ids as columns
     counts_df = counts_df.T  # now rows are cells, columns are genes
     counts_mat = counts_df.to_numpy()   # shape: (N_cells, N_genes)
 
     # OPTIONAL: filter out cells with UMI below spot_umi_threshold
-    spot_umi_threshold = 1_000
-
-    spots_to_keep=np.sum(counts_mat, axis=1)>=spot_umi_threshold
-    print(f'number of removed spots: {counts_mat.shape[0]-spots_to_keep.sum()}')
-    counts_mat=counts_mat[spots_to_keep,:]
     cell_ids = counts_df.index.to_numpy()  # keep cell IDs
 
     # GLM-PCA parameters
@@ -49,7 +44,7 @@ def glm_pca(output_file_path, penalty):
         columns=[f'PC{i+1}' for i in range(A.shape[1])]
     )
     glm_pca_df.insert(0, 'cell_id', glm_pca_df.index)
-    glm_pca_df.to_csv("./data/" + output_file_path, index=False)
+    glm_pca_df.to_csv(output_file_path, index=False)
     return
 
 def show_plot():
@@ -107,5 +102,5 @@ def show_plot():
     return
 
 if __name__ == '__main__':
-    show_plot()
-    #main()
+    #show_plot()
+    glm_pca("test_run_visium.csv", 10)
