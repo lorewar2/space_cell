@@ -18,6 +18,8 @@ import igraph as ig
 import leidenalg
 from scipy.spatial import cKDTree
 from scipy.special import logsumexp
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 
 REFINED_CLUSTER_PATH = "./data/refined_clusters.csv"
 PROCESS_NUMBER = 64
@@ -35,14 +37,268 @@ def main():
     best_clustering = cluster_with_gmm(data)
     # thread this now
     #threaded_refine(data, best_clustering)
-    refined = gmm_refine_negbi(data, best_clustering, 0.1, 1)
+    #refined = gmm_refine_negbi(data, best_clustering, 0.1, 1)
     # to do, dont do it straight away, save the result from refine and do this later
     #gmm_refine_negbi(data, best_clustering, 0.1, 1)
     #weights = graph_for_leiden(data, mode="knn", k=30, save_path="knn_30_graph.graphml")
     #weights = graph_for_leiden(data, mode="radius", radius=200)
     #run_leiden(data)
     #calculate_cell_charter_ari_and_plot(data)
+    do_spatial_clustering_on_top_of_gmm(data, best_clustering, 7)
     return
+
+def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
+                                        k_min=2, k_max=10,
+                                        min_fraction=0.10,
+                                        link_radius_multiplier=3.0,
+                                        min_component_fraction=0.05,
+                                        keep_only_largest_domain=True,
+                                        random_state=42):
+    spatial     = data["spatial"]
+    labels      = data["labels"]
+    total_cells = len(spatial)
+    all_coords  = spatial[["x", "y"]].values
+
+    global_tree = cKDTree(all_coords)
+    nn_dists, _ = global_tree.query(all_coords, k=2)
+    median_nn   = float(np.median(nn_dists[:, 1]))
+    link_radius = link_radius_multiplier * median_nn
+    print(f"Median nearest-neighbour distance: {median_nn:.1f}")
+    print(f"Contiguity link radius: {link_radius:.1f}\n")
+
+    n_clusters = len(gmm_clusters)
+    cmap   = plt.cm.get_cmap("tab10", n_clusters)
+    colors = {c: cmap(c) for c in range(n_clusters)}
+
+    spatial_subclusters = {}
+    pruned_clusters     = {}      # cluster_index → surviving barcodes
+    cluster_info        = []
+
+    for cluster_index, cell_list in enumerate(gmm_clusters):
+        n_cells  = len(cell_list)
+        fraction = n_cells / total_cells
+        cell_arr = np.array(cell_list)
+
+        fig, ax = plt.subplots(figsize=(8, 7))
+        ax.scatter(all_coords[:, 0], all_coords[:, 1],
+                   c="lightgray", s=8, alpha=0.5, linewidths=0)
+        if n_cells:
+            cl_coords = spatial.loc[cell_list, ["x", "y"]].values
+            ax.scatter(cl_coords[:, 0], cl_coords[:, 1],
+                       color=colors[cluster_index], s=18, alpha=0.9,
+                       linewidths=0.3, edgecolors="white")
+        ax.set_title(f"GMM cluster {cluster_index}  "
+                     f"(n={n_cells}, {fraction*100:.1f}% of cells)", fontsize=12)
+        ax.set_xlabel("x"); ax.set_ylabel("y")
+        ax.set_aspect("equal")
+        plt.tight_layout()
+        plt.savefig(f"gmm_cluster_{cluster_index}_spatial.png", dpi=150, bbox_inches="tight")
+        plt.show()
+
+        if n_cells < k_max:
+            print(f"Cluster {cluster_index}: only {n_cells} cells, skipping sub-clustering")
+            spatial_subclusters[cluster_index] = [list(cell_list)]
+            pruned_clusters[cluster_index]     = list(cell_list)
+            cluster_info.append({"index": cluster_index, "n_cells": n_cells,
+                                 "n_kept": n_cells, "fraction": fraction,
+                                 "best_k": None, "n_components": None,
+                                 "largest_comp_frac": None, "accepted": False,
+                                 "reason": "too few cells"})
+            continue
+
+        X = spatial.loc[cell_list, ["x", "y"]].values.astype(float)
+
+        n_components, comp_labels, keep_mask, largest_frac = spatial_fragmentation(
+            X, link_radius, min_component_fraction
+        )
+
+        if keep_only_largest_domain and n_components > 1:
+            sizes        = np.bincount(comp_labels)
+            largest_comp = int(np.argmax(sizes))
+            keep_mask    = comp_labels == largest_comp
+
+        n_dropped = int((~keep_mask).sum())
+        if n_dropped:
+            print(f"Cluster {cluster_index}: dropping {n_dropped} cells "
+                  f"in minority spatial domain(s)")
+
+        kept_barcodes = cell_arr[keep_mask].tolist()
+        pruned_clusters[cluster_index] = kept_barcodes
+
+        X_kept   = X[keep_mask]
+        n_kept   = len(kept_barcodes)
+        frac_kept = n_kept / total_cells
+
+        k_upper = min(k_max, max(k_min, n_kept - 1))
+        k_range = range(k_min, k_upper + 1)
+        bics, models = [], {}
+        for k in k_range:
+            gm = GaussianMixture(n_components=k, covariance_type="full",
+                                 init_params="k-means++", n_init=5,
+                                 random_state=random_state, max_iter=300)
+            gm.fit(X_kept)
+            bics.append(gm.bic(X_kept))
+            models[k] = gm
+
+        best_k = list(k_range)[int(np.argmin(bics))]
+        y_sub  = models[best_k].predict(X_kept)
+
+        reasons = []
+        if frac_kept < min_fraction:
+            reasons.append(f"only {frac_kept*100:.1f}% of cells after pruning "
+                           f"(< {min_fraction*100:.0f}%)")
+        if n_components > 1:
+            reasons.append(f"fragmented into {n_components} separate regions "
+                           f"(largest holds {largest_frac*100:.0f}%)")
+
+        accepted = len(reasons) == 0
+        status   = "ACCEPTED" if accepted else "REJECTED: " + "; ".join(reasons)
+        print(f"Cluster {cluster_index}: best k = {best_k}, "
+              f"components = {n_components}, kept {n_kept}/{n_cells} "
+              f"({frac_kept*100:.1f}%)  →  {status}")
+        if accepted and best_k >= 5:
+            print(f"    (k = {best_k} is high but the cluster is contiguous, so it is kept)")
+
+        cluster_info.append({"index": cluster_index, "n_cells": n_cells,
+                             "n_kept": n_kept, "fraction": fraction,
+                             "frac_kept": frac_kept, "best_k": best_k,
+                             "n_components": n_components,
+                             "largest_comp_frac": largest_frac,
+                             "n_dropped": n_dropped, "accepted": accepted,
+                             "reason": "; ".join(reasons) if reasons else "ok"})
+
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        ax.plot(list(k_range), bics, marker="o", color="#3498db", linewidth=1.5)
+        ax.axvline(best_k, color="#e74c3c", linestyle="--", linewidth=1,
+                   label=f"best k = {best_k}")
+        ax.set_xlabel("Number of spatial sub-clusters (k)")
+        ax.set_ylabel("BIC (lower is better)")
+        ax.set_title(f"Model selection for GMM cluster {cluster_index}  "
+                     f"[{n_components} region(s), "
+                     f"{'accepted' if accepted else 'rejected'}]", fontsize=11)
+        ax.set_xticks(list(k_range))
+        ax.legend(fontsize=8)
+        plt.tight_layout()
+        plt.savefig(f"gmm_cluster_{cluster_index}_elbow.png", dpi=150, bbox_inches="tight")
+        plt.show()
+
+        sub_cmap = plt.cm.get_cmap("tab20", best_k)
+        fig, ax = plt.subplots(figsize=(8, 7))
+        ax.scatter(all_coords[:, 0], all_coords[:, 1],
+                   c="lightgray", s=8, alpha=0.4, linewidths=0)
+        if n_dropped:
+            X_drop = X[~keep_mask]
+            ax.scatter(X_drop[:, 0], X_drop[:, 1], c="black", marker="x",
+                       s=22, alpha=0.7, linewidths=0.8,
+                       label=f"dropped (n={n_dropped})")
+        for s in range(best_k):
+            m = y_sub == s
+            ax.scatter(X_kept[m, 0], X_kept[m, 1], color=sub_cmap(s), s=20,
+                       alpha=0.9, linewidths=0.3, edgecolors="white",
+                       label=f"sub {s} (n={m.sum()})")
+        ax.set_title(f"GMM cluster {cluster_index} — sub-clusters (k={best_k}), "
+                     f"{n_components} region(s)  "
+                     f"[{'accepted' if accepted else 'rejected'}]", fontsize=11)
+        ax.set_xlabel("x"); ax.set_ylabel("y")
+        ax.set_aspect("equal")
+        ax.legend(fontsize=7, markerscale=1.2, loc="upper right")
+        plt.tight_layout()
+        plt.savefig(f"gmm_cluster_{cluster_index}_subclusters.png", dpi=150, bbox_inches="tight")
+        plt.show()
+
+        kept_arr = np.array(kept_barcodes)
+        spatial_subclusters[cluster_index] = [
+            kept_arr[y_sub == s].tolist() for s in range(best_k)
+        ]
+
+    accepted_idx = [c["index"] for c in cluster_info if c["accepted"]]
+    rejected     = [c for c in cluster_info if not c["accepted"]]
+
+    print(f"\nAccepted {len(accepted_idx)} / {n_clusters} clusters "
+          f"(expected {expected_n_clusters})")
+
+    if len(accepted_idx) < expected_n_clusters:
+        rejected_sorted = sorted(rejected, key=lambda c: c["n_kept"], reverse=True)
+        for c in rejected_sorted[:expected_n_clusters - len(accepted_idx)]:
+            accepted_idx.append(c["index"])
+            c["accepted"] = True
+            c["reason"]  += "  (re-added to reach expected cluster count)"
+            print(f"  re-added cluster {c['index']} "
+                  f"(n_kept={c['n_kept']}) — {c['reason']}")
+
+    accepted_idx = sorted(accepted_idx)
+    print(f"Final kept clusters: {accepted_idx}  ({len(accepted_idx)} total)")
+
+    eval_barcodes, eval_pred = [], []
+    for ci in accepted_idx:
+        for bc in pruned_clusters[ci]:
+            if bc in labels.index:
+                eval_barcodes.append(bc)
+                eval_pred.append(ci)
+
+    y_true = labels.loc[eval_barcodes].values
+    y_pred = np.array(eval_pred)
+
+    ari = adjusted_rand_score(y_true, y_pred)
+
+    coverage = len(eval_barcodes) / total_cells
+    print(f"\nEvaluated on {len(eval_barcodes)}/{total_cells} cells "
+          f"({coverage*100:.1f}% coverage)")
+    print(f"ARI = {ari:.4f}")
+
+    eval_coords = spatial.loc[eval_barcodes, ["x", "y"]].values
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    gt_unique = sorted(labels.unique())
+    gt_cmap   = plt.cm.get_cmap("tab10", len(gt_unique))
+    gt_colors = {v: gt_cmap(i) for i, v in enumerate(gt_unique)}
+
+    axes[0].scatter(all_coords[:, 0], all_coords[:, 1],
+                    c="lightgray", s=6, alpha=0.35, linewidths=0)
+    axes[0].scatter(eval_coords[:, 0], eval_coords[:, 1],
+                    c=[gt_colors[v] for v in y_true],
+                    s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
+    axes[0].set_title("Ground truth (retained cells)", fontsize=11)
+    axes[0].legend(handles=[mpatches.Patch(color=gt_colors[v], label=v)
+                            for v in gt_unique], fontsize=7, loc="upper right")
+
+    axes[1].scatter(all_coords[:, 0], all_coords[:, 1],
+                    c="lightgray", s=6, alpha=0.35, linewidths=0)
+    axes[1].scatter(eval_coords[:, 0], eval_coords[:, 1],
+                    c=[colors[c] for c in y_pred],
+                    s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
+    axes[1].set_title(f"Retained clusters (n={len(accepted_idx)})\n"
+                      f"ARI = {ari:.3f}", fontsize=11)
+    axes[1].legend(handles=[mpatches.Patch(color=colors[c], label=f"cluster {c}")
+                            for c in accepted_idx], fontsize=7, loc="upper right")
+
+    for ax in axes:
+        ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_aspect("equal")
+
+    plt.suptitle("Accepted clusters after spatial pruning vs ground truth", fontsize=13)
+    plt.tight_layout()
+    plt.savefig("spatial_pruned_final.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+
+def spatial_fragmentation(coords, link_radius, min_component_fraction=0.05):
+    n     = len(coords)
+    tree  = cKDTree(coords)
+    pairs = tree.query_pairs(r=link_radius, output_type="ndarray")
+
+    if len(pairs) == 0:
+        return n, np.arange(n), np.zeros(n, dtype=bool), 1.0 / n
+
+    adj = csr_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(n, n))
+    _, comp_labels = connected_components(adj, directed=False)
+
+    sizes         = np.bincount(comp_labels)
+    min_size      = max(1, min_component_fraction * n)
+    substantial   = np.where(sizes >= min_size)[0]
+    keep_mask     = np.isin(comp_labels, substantial)
+
+    return len(substantial), comp_labels, keep_mask, float(sizes.max()) / n
 
 def gmm_refine_negbi(data, gmm_clusters, theta, thread_number):
     n_clusters = NUM_CLUS
@@ -313,7 +569,7 @@ def cluster_with_gmm(data):
     y_true     = labels.loc[shared_bcs].values
 
     # lopp here
-    for seed in range(1, 20):
+    for seed in range(1, 3):
         # first cluster with gmm using glm pca data
         gmm = GaussianMixture(
             n_components    = n_clusters,
@@ -414,6 +670,7 @@ def find_best_cells_to_add_to_each_stack_iter(original_cluster_stacks, gmm_clust
 
             # together
             score_loss =  (1_000_000.0 * (spatial_score_loss * negbi_score_loss)) / total_cells
+
             if cell_index % max(1, int(len(available) / 3)) == 0:
                 print(f"thread_number: {thread_number}\tstack {cluster_stack_index}\tcell {cell_index}\tcurrent score {score_loss:.3f}\tbest score {best_score_loss:.3f}")
             if score_loss > best_score_loss and negbi_separable == True:
@@ -481,7 +738,7 @@ def find_best_cells_to_add_to_each_stack_init(original_cluster_stacks, gmm_clust
         spatial_score_loss = spatial_other_cc_loss_total / (spatial_own_cc_loss_total + 1e-8)
 
         # together
-        score_loss = 1_000_000.0 * (spatial_score_loss * negbi_score_loss) / total_cells
+        score_loss = (1_000_000.0 * (spatial_score_loss * negbi_score_loss)) / total_cells
 
         if score_loss > best_score_loss and negbi_separable == True:
             best_score_loss = score_loss
