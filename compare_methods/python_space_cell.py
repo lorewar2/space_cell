@@ -48,12 +48,15 @@ def main():
     return
 
 def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
-                                        k_min=2, k_max=10,
-                                        min_fraction=0.10,
-                                        link_radius_multiplier=3.0,
+                                        k_min=2, k_max=7,
+                                        k_reject_threshold=3,
+                                        max_spatial_domains=3,
+                                        k_hard_threshold=5,
+                                        link_radius_multiplier=2.5,
                                         min_component_fraction=0.05,
-                                        keep_only_largest_domain=True,
+                                        center_min_fraction=0.10,
                                         random_state=42):
+
     spatial     = data["spatial"]
     labels      = data["labels"]
     total_cells = len(spatial)
@@ -71,7 +74,7 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
     colors = {c: cmap(c) for c in range(n_clusters)}
 
     spatial_subclusters = {}
-    pruned_clusters     = {}      # cluster_index → surviving barcodes
+    sub_centers_by_cluster = {}   # cluster_index → list of (x, y) kept centers
     cluster_info        = []
 
     for cluster_index, cell_list in enumerate(gmm_clusters):
@@ -98,75 +101,83 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
         if n_cells < k_max:
             print(f"Cluster {cluster_index}: only {n_cells} cells, skipping sub-clustering")
             spatial_subclusters[cluster_index] = [list(cell_list)]
-            pruned_clusters[cluster_index]     = list(cell_list)
+            # single center = mean of the whole cluster
+            if n_cells:
+                c_xy = spatial.loc[cell_list, ["x", "y"]].values.astype(float).mean(axis=0)
+                sub_centers_by_cluster[cluster_index] = [tuple(c_xy)]
+            else:
+                sub_centers_by_cluster[cluster_index] = []
             cluster_info.append({"index": cluster_index, "n_cells": n_cells,
-                                 "n_kept": n_cells, "fraction": fraction,
-                                 "best_k": None, "n_components": None,
-                                 "largest_comp_frac": None, "accepted": False,
-                                 "reason": "too few cells"})
+                                 "fraction": fraction, "best_k": None,
+                                 "n_components": None, "accepted": True,
+                                 "reason": "too few cells to assess; accepted"})
             continue
 
         X = spatial.loc[cell_list, ["x", "y"]].values.astype(float)
 
-        n_components, comp_labels, keep_mask, largest_frac = spatial_fragmentation(
+        # find the spatial domains
+        n_components, comp_labels, _, largest_frac = spatial_fragmentation(
             X, link_radius, min_component_fraction
         )
 
-        if keep_only_largest_domain and n_components > 1:
-            sizes        = np.bincount(comp_labels)
-            largest_comp = int(np.argmax(sizes))
-            keep_mask    = comp_labels == largest_comp
 
-        n_dropped = int((~keep_mask).sum())
-        if n_dropped:
-            print(f"Cluster {cluster_index}: dropping {n_dropped} cells "
-                  f"in minority spatial domain(s)")
-
-        kept_barcodes = cell_arr[keep_mask].tolist()
-        pruned_clusters[cluster_index] = kept_barcodes
-
-        X_kept   = X[keep_mask]
-        n_kept   = len(kept_barcodes)
-        frac_kept = n_kept / total_cells
-
-        k_upper = min(k_max, max(k_min, n_kept - 1))
-        k_range = range(k_min, k_upper + 1)
+        k_range = range(k_min, k_max + 1)
         bics, models = [], {}
         for k in k_range:
             gm = GaussianMixture(n_components=k, covariance_type="full",
                                  init_params="k-means++", n_init=5,
                                  random_state=random_state, max_iter=300)
-            gm.fit(X_kept)
-            bics.append(gm.bic(X_kept))
+            gm.fit(X)
+            bics.append(gm.bic(X))
             models[k] = gm
 
-        best_k = list(k_range)[int(np.argmin(bics))]
-        y_sub  = models[best_k].predict(X_kept)
+        best_k  = list(k_range)[int(np.argmin(bics))]
+        best_gm = models[best_k]
+        y_sub   = best_gm.predict(X)
 
-        reasons = []
-        if frac_kept < min_fraction:
-            reasons.append(f"only {frac_kept*100:.1f}% of cells after pruning "
-                           f"(< {min_fraction*100:.0f}%)")
-        if n_components > 1:
-            reasons.append(f"fragmented into {n_components} separate regions "
-                           f"(largest holds {largest_frac*100:.0f}%)")
+        # reject for these
+        reject_rule1 = (best_k > k_reject_threshold) and (n_components > max_spatial_domains)
+        reject_rule2 = (best_k > k_hard_threshold)   and (n_components > 1)
+        reject       = reject_rule1 or reject_rule2
+        accepted     = not reject
 
-        accepted = len(reasons) == 0
-        status   = "ACCEPTED" if accepted else "REJECTED: " + "; ".join(reasons)
+        if reject:
+            parts = []
+            if reject_rule1:
+                parts.append(f"best k = {best_k} (> {k_reject_threshold}) AND "
+                             f"{n_components} domains (> {max_spatial_domains})")
+            if reject_rule2:
+                parts.append(f"best k = {best_k} (> {k_hard_threshold}) AND "
+                             f"{n_components} domains (> 1)")
+            reason = " OR ".join(parts)
+        else:
+            reason = "ok"
+
+        status = "ACCEPTED" if accepted else "REJECTED: " + reason
         print(f"Cluster {cluster_index}: best k = {best_k}, "
-              f"components = {n_components}, kept {n_kept}/{n_cells} "
-              f"({frac_kept*100:.1f}%)  →  {status}")
-        if accepted and best_k >= 5:
-            print(f"    (k = {best_k} is high but the cluster is contiguous, so it is kept)")
+              f"domains = {n_components}, n = {n_cells}  →  {status}")
+
+        kept_centers = []
+        for s in range(best_k):
+            m       = y_sub == s
+            n_sub   = int(m.sum())
+            sub_frac = n_sub / n_cells
+            if sub_frac >= center_min_fraction:
+                center_xy = X[m].mean(axis=0)          # (x, y) of this sub-cluster
+                kept_centers.append(tuple(center_xy))
+            else:
+                print(f"    sub {s}: {n_sub} cells ({sub_frac*100:.1f}%) "
+                      f"< {center_min_fraction*100:.0f}% — center dropped")
+        sub_centers_by_cluster[cluster_index] = kept_centers
 
         cluster_info.append({"index": cluster_index, "n_cells": n_cells,
-                             "n_kept": n_kept, "fraction": fraction,
-                             "frac_kept": frac_kept, "best_k": best_k,
+                             "fraction": fraction, "best_k": best_k,
                              "n_components": n_components,
                              "largest_comp_frac": largest_frac,
-                             "n_dropped": n_dropped, "accepted": accepted,
-                             "reason": "; ".join(reasons) if reasons else "ok"})
+                             "n_kept_centers": len(kept_centers),
+                             "accepted": accepted, "reason": reason})
 
+        # elbow plot
         fig, ax = plt.subplots(figsize=(7, 4.5))
         ax.plot(list(k_range), bics, marker="o", color="#3498db", linewidth=1.5)
         ax.axvline(best_k, color="#e74c3c", linestyle="--", linewidth=1,
@@ -174,7 +185,7 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
         ax.set_xlabel("Number of spatial sub-clusters (k)")
         ax.set_ylabel("BIC (lower is better)")
         ax.set_title(f"Model selection for GMM cluster {cluster_index}  "
-                     f"[{n_components} region(s), "
+                     f"[{n_components} domain(s), "
                      f"{'accepted' if accepted else 'rejected'}]", fontsize=11)
         ax.set_xticks(list(k_range))
         ax.legend(fontsize=8)
@@ -186,31 +197,31 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
         fig, ax = plt.subplots(figsize=(8, 7))
         ax.scatter(all_coords[:, 0], all_coords[:, 1],
                    c="lightgray", s=8, alpha=0.4, linewidths=0)
-        if n_dropped:
-            X_drop = X[~keep_mask]
-            ax.scatter(X_drop[:, 0], X_drop[:, 1], c="black", marker="x",
-                       s=22, alpha=0.7, linewidths=0.8,
-                       label=f"dropped (n={n_dropped})")
         for s in range(best_k):
             m = y_sub == s
-            ax.scatter(X_kept[m, 0], X_kept[m, 1], color=sub_cmap(s), s=20,
-                       alpha=0.9, linewidths=0.3, edgecolors="white",
+            ax.scatter(X[m, 0], X[m, 1], color=sub_cmap(s), s=20, alpha=0.9,
+                       linewidths=0.3, edgecolors="white",
                        label=f"sub {s} (n={m.sum()})")
+        # mark kept centers
+        if kept_centers:
+            kc = np.array(kept_centers)
+            ax.scatter(kc[:, 0], kc[:, 1], c="black", marker="*", s=200,
+                       edgecolors="white", linewidths=0.8, label="kept center", zorder=5)
         ax.set_title(f"GMM cluster {cluster_index} — sub-clusters (k={best_k}), "
-                     f"{n_components} region(s)  "
+                     f"{len(kept_centers)} kept center(s)  "
                      f"[{'accepted' if accepted else 'rejected'}]", fontsize=11)
         ax.set_xlabel("x"); ax.set_ylabel("y")
         ax.set_aspect("equal")
-        ax.legend(fontsize=7, markerscale=1.2, loc="upper right")
+        ax.legend(fontsize=7, markerscale=1.0, loc="upper right")
         plt.tight_layout()
         plt.savefig(f"gmm_cluster_{cluster_index}_subclusters.png", dpi=150, bbox_inches="tight")
         plt.show()
 
-        kept_arr = np.array(kept_barcodes)
         spatial_subclusters[cluster_index] = [
-            kept_arr[y_sub == s].tolist() for s in range(best_k)
+            cell_arr[y_sub == s].tolist() for s in range(best_k)
         ]
 
+    # enforce expected cluster count
     accepted_idx = [c["index"] for c in cluster_info if c["accepted"]]
     rejected     = [c for c in cluster_info if not c["accepted"]]
 
@@ -218,20 +229,29 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
           f"(expected {expected_n_clusters})")
 
     if len(accepted_idx) < expected_n_clusters:
-        rejected_sorted = sorted(rejected, key=lambda c: c["n_kept"], reverse=True)
+        rejected_sorted = sorted(rejected, key=lambda c: c["n_components"])
         for c in rejected_sorted[:expected_n_clusters - len(accepted_idx)]:
             accepted_idx.append(c["index"])
             c["accepted"] = True
             c["reason"]  += "  (re-added to reach expected cluster count)"
             print(f"  re-added cluster {c['index']} "
-                  f"(n_kept={c['n_kept']}) — {c['reason']}")
+                  f"(domains={c['n_components']}) — {c['reason']}")
 
     accepted_idx = sorted(accepted_idx)
     print(f"Final kept clusters: {accepted_idx}  ({len(accepted_idx)} total)")
 
+    accepted_clusters_list = [gmm_clusters[ci] for ci in accepted_idx]
+
+    spatial_centers_of_clusters = [
+        sub_centers_by_cluster.get(ci, []) for ci in accepted_idx
+    ]
+
+    for ci, centers in zip(accepted_idx, spatial_centers_of_clusters):
+        print(f"  cluster {ci}: {len(centers)} spatial center(s)")
+
     eval_barcodes, eval_pred = [], []
     for ci in accepted_idx:
-        for bc in pruned_clusters[ci]:
+        for bc in gmm_clusters[ci]:
             if bc in labels.index:
                 eval_barcodes.append(bc)
                 eval_pred.append(ci)
@@ -239,8 +259,7 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
     y_true = labels.loc[eval_barcodes].values
     y_pred = np.array(eval_pred)
 
-    ari = adjusted_rand_score(y_true, y_pred)
-
+    ari      = adjusted_rand_score(y_true, y_pred)
     coverage = len(eval_barcodes) / total_cells
     print(f"\nEvaluated on {len(eval_barcodes)}/{total_cells} cells "
           f"({coverage*100:.1f}% coverage)")
@@ -259,7 +278,7 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
     axes[0].scatter(eval_coords[:, 0], eval_coords[:, 1],
                     c=[gt_colors[v] for v in y_true],
                     s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
-    axes[0].set_title("Ground truth (retained cells)", fontsize=11)
+    axes[0].set_title("Ground truth (accepted clusters)", fontsize=11)
     axes[0].legend(handles=[mpatches.Patch(color=gt_colors[v], label=v)
                             for v in gt_unique], fontsize=7, loc="upper right")
 
@@ -268,7 +287,14 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
     axes[1].scatter(eval_coords[:, 0], eval_coords[:, 1],
                     c=[colors[c] for c in y_pred],
                     s=15, alpha=0.85, linewidths=0.3, edgecolors="white")
-    axes[1].set_title(f"Retained clusters (n={len(accepted_idx)})\n"
+    # overlay all kept spatial centers
+    for ci in accepted_idx:
+        centers = sub_centers_by_cluster.get(ci, [])
+        if centers:
+            kc = np.array(centers)
+            axes[1].scatter(kc[:, 0], kc[:, 1], c="black", marker="*", s=180,
+                            edgecolors="white", linewidths=0.8, zorder=5)
+    axes[1].set_title(f"Accepted clusters (n={len(accepted_idx)}) + spatial centers\n"
                       f"ARI = {ari:.3f}", fontsize=11)
     axes[1].legend(handles=[mpatches.Patch(color=colors[c], label=f"cluster {c}")
                             for c in accepted_idx], fontsize=7, loc="upper right")
@@ -276,11 +302,12 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
     for ax in axes:
         ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_aspect("equal")
 
-    plt.suptitle("Accepted clusters after spatial pruning vs ground truth", fontsize=13)
+    plt.suptitle("Accepted clusters vs ground truth", fontsize=13)
     plt.tight_layout()
-    plt.savefig("spatial_pruned_final.png", dpi=150, bbox_inches="tight")
+    plt.savefig("spatial_accepted_final.png", dpi=150, bbox_inches="tight")
     plt.show()
 
+    return accepted_clusters_list, spatial_centers_of_clusters
 
 def spatial_fragmentation(coords, link_radius, min_component_fraction=0.05):
     n     = len(coords)
