@@ -3,219 +3,355 @@
 ```{r}
 library(ggplot2)
 library(patchwork)
+library(MASS)
+library(ggforce)
 
 set.seed(1)
 
-## ---- 1. Cells in 2D, 4 clusters ---------------------------
-n_per   <- 200
-centers <- data.frame(cluster = factor(1:4),
-                       cx = c(0, 5, 0, 5),
-                       cy = c( 5, 5, 0, 0))
+## Number of cells per cluster
+n_per <- 200
 
-cells <- do.call(rbind, lapply(1:4, function(k) {
-  data.frame(cluster = factor(k),
-             x = rnorm(n_per, centers$cx[k], 1),
-             y = rnorm(n_per, centers$cy[k], 1))
+## Define cluster parameters
+clusters <- list(
+
+  list(
+    name   = "4",
+    center = c(1, 7),
+    cell_number = 200,
+    Sigma  = matrix(c(0.5, 0,
+                      0, 0.5), nrow = 2)   # positive diagonal
+  ),
+  list(
+    name   = "1-1",
+    center = c(4.4, 6),
+    cell_number = 200,
+    Sigma  = matrix(c(0.8, 0.6,
+                      0.6, 0.8), nrow = 2)   # positive diagonal
+  ),
+  list(
+    name   = "1-2",
+    center = c(1, 3),
+    cell_number = 200,
+    Sigma  = matrix(c(0.3, 0.1,
+                      0.1, 0.3), nrow = 2)   # positive diagonal
+  ),
+  list(
+    name   = "2-1",
+    center = c(9, 8),
+    cell_number = 200,
+    Sigma  = matrix(c(0.4, 0.0,
+                      0.0, 0.4), nrow = 2)   # positive diagonal
+  ),
+  list(
+    name   = "2-2",
+    center = c(7.5, 4.8),
+    cell_number = 200,
+    Sigma  = matrix(c(0.3, 0.1,
+                      0.2, 0.3), nrow = 2)   # positive diagonal
+  ),
+  list(
+    name   = "2-3",
+    center = c(0.5, 0.5),
+    cell_number = 50,
+    Sigma  = matrix(c(1, 0.1,
+                      0.2, 0.1), nrow = 2)   # positive diagonal
+  ),
+  list(
+    name   = "3",
+    center = c(5.5, 0.5),
+    cell_number = 200,
+    Sigma  = matrix(c(0.9, -0.6,
+                      -0.6, 0.9), nrow = 2)   # positive diagonal
+  ),
+  list(
+    name   = "1-3",
+    center = c(9.5, 3.8),
+    cell_number = 50,
+    Sigma  = matrix(c(0.1, 0,
+                      0, 1.0), nrow = 2)   # positive diagonal
+  )
+
+)
+
+## Generate cells
+cells <- do.call(rbind, lapply(seq_along(clusters), function(k) {
+
+  xy <- mvrnorm(
+    n = clusters[[k]]$cell_number,
+    mu = clusters[[k]]$center,
+    Sigma = clusters[[k]]$Sigma
+  )
+
+  data.frame(
+    id           = paste0("cell_", (k - 1) * clusters[[k]]$cell_number + seq_len(n_per)),
+    true_cluster = clusters[[k]]$name,
+    x            = xy[, 1],
+    y            = xy[, 2]
+  )
 }))
+
 cells$id <- seq_len(nrow(cells))
 
 ## ---- palette + shared theme -------------------------------
-pal <- c("1" = "#E69F00", "2" = "#56B4E9", "3" = "#009E73", "4" = "#CC79A7")
-grey_pal <- c("1" = "grey", "2" = "grey", "3" = "grey", "4" = "grey")
+pal <- c("1" = "#D85A30", "2" = "#1D9E75", "3" = "#7F77DD", "4" = "#EF9F27")
+grey_pal <- c("1-1" = "#D85A30", "1-2" = "#D85A30", "1-3" = "#D85A30","2-1" = "#1D9E75", "2-2" = "#1D9E75","2-3" = "#1D9E75","3" = "#7F77DD", "4" = "#EF9F27")
 base_theme <- theme_bw(base_size = 11) +
   theme(panel.grid.minor = element_blank(),
         legend.position  = "none",
         plot.title       = element_text(face = "bold", size = 11))
 
-## ---- 2. "GLM-PCA" embedding (just a rotated/jittered view) -
-theta <- pi / 6
-R <- matrix(c(cos(theta), -sin(theta), sin(theta), cos(theta)), 2)
-emb <- as.matrix(cells[, c("x", "y")]) %*% R
-cells$pc1 <- emb[, 1] * 0.9 + rnorm(nrow(cells), 0, 0.3)
-cells$pc2 <- emb[, 2] * 1.1 + rnorm(nrow(cells), 0, 0.3)
-
-## ---- 3. Selection (illustrative only) ---------------------
-coords <- as.matrix(cells[, c("pc1", "pc2")])
-
-# D: representative per cluster = cell nearest its cluster centroid (labels 1-4)
-reps <- do.call(rbind, lapply(1:4, function(k) {
-  s   <- cells[cells$cluster == k, ]
-  cen <- colMeans(s[, c("pc1", "pc2")])
-  s[which.min((s$pc1 - cen[1])^2 + (s$pc2 - cen[2])^2), ]
-}))
-reps$order_lab <- 1:4
-
-# E: iterative pick = closest cell to the centroid cell that is still at
-#    least `min_gap` away, so the marker/label stays visible (labels 5-8)
-min_gap <- 0.9
-extra <- do.call(rbind, lapply(1:4, function(k) {
-  rid  <- reps$id[k]
-  cand <- cells[cells$cluster == k & cells$id != rid, ]
-  d    <- sqrt((cand$pc1 - coords[rid, 1])^2 + (cand$pc2 - coords[rid, 2])^2)
-  cand <- cand[d >= min_gap, ]; d <- d[d >= min_gap]
-  cand[which.min(d), ]                 # nearest cell beyond the gap
-}))
-extra$order_lab <- 5:8
-
-sel_all <- rbind(reps, extra)   # all labeled, selected cells
-
-## ---- 4. Panels --------------------------------------------
-pA <- ggplot(cells, aes(x, y, color = cluster)) +
+ggplot(cells, aes(x, y, color = true_cluster)) +
   geom_point(size = 1.6, alpha = 0.85) +
   scale_color_manual(values = grey_pal) +
   labs(title = "", x = "Dim 1", y = "Dim 2") +
-  theme_minimal() +
+  coord_cartesian(xlim = c(0, 10), ylim = c(0, 10)) +
+  theme_classic() +
   theme(
     panel.grid = element_blank(),       # Removes all major and minor grid lines
     axis.ticks = element_blank(),       # Removes all axis tick marks
     axis.text = element_blank(),        # Removes the text labels next to the ticks
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
-    axis.title = element_blank()        # (Optional) Removes axis titles (e.g., "wt", "mpg")
+    #panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+    axis.title = element_blank(),       # (Optional) Removes axis titles (e.g., "wt", "mpg"),
+    legend.position = "none"
   )
+```
+```{r}
+## ---- helper: highlight chosen clusters dark grey, rest light grey ----
+plot_highlight <- function(cells, highlight, title = "") {
+  cells$hl <- ifelse(cells$true_cluster %in% highlight, "yes", "no")
 
-pB <- ggplot(cells, aes(pc1, pc2, color = cluster)) +
-  geom_point(size = 1.6, alpha = 0.85) +
-  scale_color_manual(values = grey_pal) +
-  labs(title = "", x = "Dim 1", y = "Dim 2") +
-  theme_minimal() +
-  theme(
-    panel.grid = element_blank(),       # Removes all major and minor grid lines
-    axis.ticks = element_blank(),       # Removes all axis tick marks
-    axis.text = element_blank(),        # Removes the text labels next to the ticks
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
-    axis.title = element_blank()        # (Optional) Removes axis titles (e.g., "wt", "mpg")
-  )
+  ggplot(cells, aes(x, y)) +
+    # background: non-highlighted cells in light grey
+    geom_point(data = subset(cells, hl == "no"),
+               color = "grey80", size = 1.6, alpha = 0.6) +
+    # foreground: highlighted cells in dark grey
+    geom_point(data = subset(cells, hl == "yes"),
+               color = "grey25", size = 1.6, alpha = 0.9) +
+    labs(title = title, x = "Dim 1", y = "Dim 2") +
+    coord_cartesian(xlim = c(0, 10), ylim = c(0, 10)) +
+    theme_classic() +
+    theme(
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+      panel.grid = element_blank(),
+      axis.ticks = element_blank(),
+      axis.text  = element_blank(),
+      axis.title = element_blank(),
+      plot.title = element_text(face = "bold", size = 11),
+      legend.position = "none"
+    )
+}
 
-pC <- ggplot(cells, aes(pc1, pc2, color = cluster)) +
-  stat_ellipse(type = "norm", level = 0.9, linewidth = 0.6) +
-  geom_point(size = 1.6, alpha = 0.85) +
-  scale_color_manual(values = pal, name = NULL,
-                     labels = paste("Cluster", 1:4)) +
-  labs(title = "", x = "Dim 1", y = "Dim 2") +
-  theme_minimal() + theme(legend.position = "right") +
-  theme(
-    panel.grid = element_blank(),       # Removes all major and minor grid lines
-    axis.ticks = element_blank(),       # Removes all axis tick marks
-    axis.text = element_blank(),        # Removes the text labels next to the ticks
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
-    axis.title = element_blank()        # (Optional) Removes axis titles (e.g., "wt", "mpg")
-  )
+## ---- define which clusters each plot highlights ----------------------
+p1 <- plot_highlight(cells, c("1-1", "1-2", "1-3"), title = "GLM-PC1")
+p2 <- plot_highlight(cells, c("2-1", "2-2", "2-3"), title = "GLM-PC2")
+p3 <- plot_highlight(cells, c("3"),                 title = "GLM-PC3")
+p4 <- plot_highlight(cells, c("4"),                 title = "GLM-PC4")
 
-pD <- ggplot(cells, aes(pc1, pc2)) +
-  geom_point(color = "grey80", size = 1.4) +
-  geom_point(data = reps, aes(fill = cluster),
-             shape = 21, color = "black", size = 3.8, stroke = 0.8) +
-  geom_text(data = reps, aes(label = order_lab), size = 2.6, vjust = -1.1) +
-  scale_fill_manual(values = pal) +
-  labs(title = "",
-       x = "Dim 1", y = "Dim 2") +
-  theme_minimal() + 
-  theme(
-    panel.grid = element_blank(),       # Removes all major and minor grid lines
-    axis.ticks = element_blank(),       # Removes all axis tick marks
-    axis.text = element_blank(),        # Removes the text labels next to the ticks
-    axis.title = element_blank(),        # (Optional) Removes axis titles (e.g., "wt", "mpg")
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 1)
-  )
+## ---- assemble 2x2 grid -----------------------------------------------
+(p1 | p2) / (p3 | p4)
+```
 
-pE <- ggplot(cells, aes(pc1, pc2)) +
-  geom_point(color = "grey80", size = 1.4) +
-  geom_point(data = reps,  aes(fill = cluster),          # centroid cells (squares)
-             shape = 22, color = "black", size = 3.6, stroke = 0.8) +
-  geom_point(data = extra, aes(fill = cluster),          # nearby picks (circles)
-             shape = 21, color = "black", size = 3.4, stroke = 0.8) +
-  geom_text(data = sel_all, aes(label = order_lab), size = 2.6, vjust = -1.1) +
-  scale_fill_manual(values = pal) +
-  labs(title = "", x = "GLM-PC1", y = "GLM-PC2") +
-  theme_minimal() + 
-  theme(
-    panel.grid = element_blank(),       # Removes all major and minor grid lines
-    axis.ticks = element_blank(),       # Removes all axis tick marks
-    axis.text = element_blank(),        # Removes the text labels next to the ticks
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
-    axis.title = element_blank()        # (Optional) Removes axis titles (e.g., "wt", "mpg")
-  )
+```{r}
+library(ggforce)
+## ---- helper: color highlighted clusters, circle each sub-cluster -----
+plot_highlight_circled <- function(cells, highlight, group_key, title = "") {
+  # group_key = "1", "2", "3", or "4" → picks the palette colour
+  col <- pal[[group_key]]
 
-## ---- 5. Assemble + save -----------------------------------
-fig <- (pB | pC) / (pD | pE)
-
-ggsave("method_overview.png", fig, width = 12, height = 12, dpi = 300)
-ggsave("method_overview.pdf", fig, width = 12, height = 12)
-fig
-
-## ---- Per-cluster highlight: grey varies within & across panels ----
-low_grey  <- c("grey10", "grey20", "grey30", "grey40")   # darkest point per panel
-high_grey <- c("grey45", "grey55", "grey65", "grey75")   # lightest point per panel
-
-highlight_plots <- lapply(1:4, function(k) {
-  bg <- subset(cells, cluster != k)
-  fg <- subset(cells, cluster == k)
-  cen <- colMeans(fg[, c("pc1", "pc2")])
-  fg$d <- sqrt((fg$pc1 - cen[1])^2 + (fg$pc2 - cen[2])^2)   # distance to centroid
+  hl_cells  <- subset(cells, true_cluster %in% highlight)
+  bg_cells  <- subset(cells, !(true_cluster %in% highlight))
 
   ggplot() +
-    geom_point(data = bg, aes(pc1, pc2), color = "grey85", size = 1.4) +
-    geom_point(data = fg, aes(pc1, pc2, color = d), size = 1.7) +
-    scale_color_gradient(low = low_grey[k], high = high_grey[k], guide = "none") +
-    labs(title = paste("GLM_PC", k), x = "GLM-PC1", y = "GLM-PC2") +
-    theme_minimal() + 
+    # background: non-highlighted cells in light grey
+    geom_point(data = bg_cells, aes(x, y),
+               color = "grey85", size = 1.6, alpha = 0.6) +
+    # foreground: highlighted cells in the group colour
+    geom_point(data = hl_cells, aes(x, y),
+               color = col, size = 1.6, alpha = 0.9) +
+    # circle each sub-cluster individually (grouped by true_cluster)
+    geom_mark_ellipse(data = hl_cells,
+                      aes(x, y, group = true_cluster),
+                      color = col, fill = NA,
+                      linewidth = 0.7, expand = unit(2, "mm")) +
+    labs(title = title, x = "Dim 1", y = "Dim 2") +
+    coord_cartesian(xlim = c(0, 10), ylim = c(0, 10)) +
+    theme_classic() +
     theme(
-    panel.grid = element_blank(),       # Removes all major and minor grid lines
-    axis.ticks = element_blank(),       # Removes all axis tick marks
-    axis.text = element_blank(),        # Removes the text labels next to the ticks
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
-    axis.title = element_blank()        # (Optional) Removes axis titles (e.g., "wt", "mpg")
-  )
-})
+      panel.grid = element_blank(),
+      axis.ticks = element_blank(),
+      axis.text  = element_blank(),
+      axis.title = element_blank(),
+      plot.title = element_text(face = "bold", size = 11),
+      legend.position = "none"
+    )
+}
 
-fig_clusters <- patchwork::wrap_plots(highlight_plots, ncol = 2)
+## ---- one plot per group ----------------------------------------------
+p1 <- plot_highlight_circled(cells, c("1-1", "1-2", "1-3"), "1", "Cluster 1")
+p2 <- plot_highlight_circled(cells, c("2-1", "2-2", "2-3"), "2", "Cluster 2")
+p3 <- plot_highlight_circled(cells, c("3"),                 "3", "Cluster 3")
+p4 <- plot_highlight_circled(cells, c("4"),                 "4", "Cluster 4")
 
-ggsave("clusters_highlight.png", fig_clusters, width = 9, height = 8, dpi = 300)
-ggsave("clusters_highlight.pdf", fig_clusters, width = 9, height = 8)
-fig_clusters
+## ---- stack horizontally ----------------------------------------------
+p1 / p2 / p3 / p4
+
 ```
 
 ```{r}
-set.seed(42)
-frac <- 0.30
-cells$assigned <- runif(nrow(cells)) < frac
-cells$ctype <- factor(ifelse(cells$assigned, as.character(cells$cluster), "Unassigned"),
-                      levels = c("1", "2", "3", "4", "Unassigned"))
-pal2 <- c(pal, "Unassigned" = "grey80")        # cluster colors + grey for unassigned
-# draw unassigned first (underneath), assigned cells on top
-cells_ord <- cells[order(cells$ctype == "Unassigned", decreasing = TRUE), ]
-p_partial <- ggplot(cells_ord, aes(pc1, pc2, color = ctype)) +
-  geom_point(size = 1.6, alpha = 0.9) +
-  scale_color_manual(values = pal2, name = NULL,
-                     breaks = c("1", "2", "3", "4", "Unassigned"),
-                     labels = c(paste("Cluster", 1:4), "Unassigned")) +
-  labs(title = "Partial clustering (~70% of cells assigned)",
-       x = "GLM-PC1", y = "GLM-PC2") +
-  theme(legend.position = "right") + 
-  theme_minimal() + 
-    theme(
-    panel.grid = element_blank(),       # Removes all major and minor grid lines
-    axis.ticks = element_blank(),       # Removes all axis tick marks
-    axis.text = element_blank(),        # Removes the text labels next to the ticks
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
-    axis.title = element_blank()        # (Optional) Removes axis titles (e.g., "wt", "mpg")
+
+set.seed(102)
+## ---- map each sub-cluster to its parent group ------------------------
+sub_to_group <- c(
+  "1-1" = "1", "1-2" = "1", "1-3" = "5",
+  "2-1" = "2", "2-2" = "2", "2-3" = "5",
+  "3"   = "3",
+  "4"   = "4"
+)
+
+## tag every cell with its parent group
+cells$group <- sub_to_group[as.character(cells$true_cluster)]
+
+## ---- pick ONE random cell per parent group (4 cells total) ----------
+selected <- do.call(rbind, lapply(unique(cells$group), function(g) {
+  pool <- cells[cells$group == g, ]
+  pool[sample(nrow(pool), 1), ]
+}))
+
+## ---- plot: all cells grey, selected cells in group colour -----------
+ggplot() +
+  geom_point(data = cells, aes(x, y),
+             color = "grey85", size = 1.6, alpha = 0.6) +
+  geom_point(data = selected, aes(x, y, fill = group),
+             shape = 21, color = "black", size = 2.5, stroke = 1, alpha = 1) +
+  scale_fill_manual(values = pal) +
+  labs(title = "", x = "Dim 1", y = "Dim 2") +
+  coord_cartesian(xlim = c(0, 10), ylim = c(0, 10)) +
+  theme_classic() +
+  theme(
+    panel.grid = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text  = element_blank(),
+    axis.title = element_blank(),
+    legend.position = "none"
   )
-ggsave("partial_clustering.png", p_partial, width = 6.5, height = 5, dpi = 300)
-ggsave("partial_clustering.pdf", p_partial, width = 6.5, height = 5)
-p_partial
+```
+```{r}
+set.seed(102)
+## ---- first selection: one cell per group (circles) -------------------
+selected_circle <- do.call(rbind, lapply(unique(cells$group), function(g) {
+  pool <- cells[cells$group == g, ]
+  pool[sample(nrow(pool), 1), ]
+}))
+
+## ---- second selection: a fairly close neighbour (squares) ------------
+## for each circle cell, rank same-group cells by distance and pick one
+## from a "fairly close" band (not the nearest, not far)
+selected_square <- do.call(rbind, lapply(seq_len(nrow(selected_circle)), function(i) {
+  ref  <- selected_circle[i, ]
+  pool <- cells[cells$group == ref$group & cells$id != ref$id, ]
+
+  d <- sqrt((pool$x - ref$x)^2 + (pool$y - ref$y)^2)
+  ord <- order(d)
+
+  # take from ranks ~5-10 (fairly close, but not immediately adjacent)
+  band <- ord[min(5, length(ord)):min(10, length(ord))]
+  pool[sample(band, 1), ]
+}))
+
+## ---- plot ------------------------------------------------------------
+ggplot() +
+  geom_point(data = cells, aes(x, y),
+             color = "grey85", size = 1.6, alpha = 0.6) +
+  geom_point(data = selected_circle, aes(x, y, fill = group),
+             shape = 21, color = "black", size = 2.5, stroke = 1) +
+  geom_point(data = selected_square, aes(x, y, fill = group),
+             shape = 22, color = "black", size = 2.5, stroke = 1) +
+  scale_fill_manual(values = pal) +
+  labs(title = "", x = "Dim 1", y = "Dim 2") +
+  coord_cartesian(xlim = c(0, 10), ylim = c(0, 10)) +
+  theme_classic() +
+  theme(
+    panel.grid = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text  = element_blank(),
+    axis.title = element_blank(),
+    legend.position = "none"
+  )
 ```
 
 ```{r}
+set.seed(2)
+## ---- map each sub-cluster to its parent group ------------------------
+sub_to_group <- c(
+  "1-1" = "1", "1-2" = "1", "1-3" = "1",
+  "2-1" = "2", "2-2" = "2", "2-3" = "2",
+  "3"   = "3",
+  "4"   = "4"
+)
+cells$group <- sub_to_group[as.character(cells$true_cluster)]
+
+## sub-clusters to leave grey regardless
+exclude_sub <- c("1-3", "2-3")
+
+## ---- pick 30% of cells from each parent group (excluding 1-3, 2-3) ---
+chosen <- do.call(rbind, lapply(unique(cells$group), function(g) {
+  pool <- cells[cells$group == g & !(cells$true_cluster %in% exclude_sub), ]
+  n_pick <- ceiling(0.30 * nrow(pool))
+  pool[sample(nrow(pool), n_pick), ]
+}))
+
+## ---- plot: chosen cells coloured, everything else grey --------------
+ggplot() +
+  # background: all cells grey (includes unchosen + excluded 1-3, 2-3)
+  geom_point(data = cells, aes(x, y),
+             color = "grey85", size = 1.6, alpha = 0.6) +
+  # foreground: chosen 30% coloured by group
+  geom_point(data = chosen, aes(x, y, color = group),
+             size = 1.8, alpha = 0.95) +
+  scale_color_manual(values = pal) +
+  labs(title = "", x = "Dim 1", y = "Dim 2") +
+  coord_cartesian(xlim = c(0, 10), ylim = c(0, 10)) +
+  theme_classic() +
+  theme(
+    panel.grid = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text  = element_blank(),
+    axis.title = element_blank(),
+    legend.position = "none"
+  )
+```
+
+```{r}
+set.seed(2)
+cells$cluster <- sub_to_group[as.character(cells$true_cluster)]
+
+## ---- define assigned cells: 30% per group, excluding 1-3 and 2-3 -----
+exclude_sub <- c("1-3", "2-3")
+
+cells$assigned <- FALSE
+for (g in unique(cells$cluster)) {
+  pool_idx <- which(cells$cluster == g & !(cells$true_cluster %in% exclude_sub))
+  n_pick   <- ceiling(0.30 * length(pool_idx))
+  chosen   <- sample(pool_idx, n_pick)
+  cells$assigned[chosen] <- TRUE
+}
+
+## ctype: assigned cells keep their group colour, others = "Unassigned"
+cells$ctype <- ifelse(cells$assigned, cells$cluster, "Unassigned")
+
+pal2 <- c(pal, "Unassigned" = "grey80")
+
+## draw unassigned first, assigned on top
+cells_ord <- cells[order(cells$assigned), ]
+
 ## ---- Connectivity: tunable within / between edge fractions ----
-set.seed(7)
-line_col <- "grey40"        # one color for ALL lines
+line_col     <- "grey40"
+within_frac  <- 0.3
+between_frac <- 0.1
+thin_frac    <- 0.4
 
-within_frac  <- 0.6         # bold within-cluster edges  (× #assigned cells)
-between_frac <- 0.2         # thin between-cluster edges  (× #assigned cells)
-thin_frac    <- 0.4         # thin unassigned->assigned   (× #unassigned cells)
-
-asg <- cells[cells$assigned, ]     # assigned (highlighted) cells
-un  <- cells[!cells$assigned, ]    # unassigned cells
+asg <- cells[cells$assigned, ]
+un  <- cells[!cells$assigned, ]
 
 ## sample n assigned-assigned pairs of a given type (same cluster or not)
 sample_pairs <- function(n, same) {
@@ -228,50 +364,48 @@ sample_pairs <- function(n, same) {
     b  <- sample(nrow(asg), m, replace = TRUE)
     ok <- (a != b) & ((asg$cluster[a] == asg$cluster[b]) == same)
     a  <- a[ok]; b <- b[ok]
-    out <- rbind(out, data.frame(x = asg$pc1[a],  y = asg$pc2[a],
-                                 xend = asg$pc1[b], yend = asg$pc2[b]))
+    out <- rbind(out, data.frame(x = asg$x[a],  y = asg$y[a],
+                                 xend = asg$x[b], yend = asg$y[b]))
   }
   out[seq_len(n), ]
 }
 
-bold_edges <- sample_pairs(round(nrow(asg) * within_frac),  same = TRUE)   # within  -> bold
-betw_edges <- sample_pairs(round(nrow(asg) * between_frac), same = FALSE)  # between -> thin
+bold_edges <- sample_pairs(round(nrow(asg) * within_frac),  same = TRUE)
+betw_edges <- sample_pairs(round(nrow(asg) * between_frac), same = FALSE)
 
 ## thin: random subset of UNASSIGNED cells linked to nearest assigned cell
 pick <- sample(nrow(un), round(nrow(un) * thin_frac))
 thin_un <- do.call(rbind, lapply(pick, function(i) {
-  d <- (asg$pc1 - un$pc1[i])^2 + (asg$pc2 - un$pc2[i])^2
+  d <- (asg$x - un$x[i])^2 + (asg$y - un$y[i])^2
   j <- which.min(d)
-  data.frame(x = un$pc1[i], y = un$pc2[i],
-             xend = asg$pc1[j], yend = asg$pc2[j])
+  data.frame(x = un$x[i], y = un$y[i],
+             xend = asg$x[j], yend = asg$y[j])
 }))
 
-thin_edges <- rbind(betw_edges, thin_un)   # between-cluster + unassigned, all thin
+thin_edges <- rbind(betw_edges, thin_un)
 
-## ---- plot ------------------------------------------------
-p_net <- ggplot() +
+## ---- plot ------------------------------------------------------------
+ggplot() +
   geom_segment(data = thin_edges, aes(x, y, xend = xend, yend = yend),
-               color = line_col, linewidth = 0.3, alpha = 0.6) +          # thin
+               color = line_col, linewidth = 0.3, alpha = 0.6) +
   geom_segment(data = bold_edges, aes(x, y, xend = xend, yend = yend),
-               color = line_col, linewidth = 1.1, alpha = 0.9,
-               lineend = "round") +                                       # bold
-  geom_point(data = cells_ord, aes(pc1, pc2, color = ctype),
-             size = 1.6, alpha = 0.9) +                                    # same highlight
+               color = line_col, linewidth = 0.6, alpha = 0.9,
+               lineend = "round") +
+  geom_point(data = cells_ord, aes(x, y, color = ctype),
+             size = 1.6, alpha = 0.9) +
   scale_color_manual(values = pal2, name = NULL,
                      breaks = c("1", "2", "3", "4", "Unassigned"),
                      labels = c(paste("Cluster", 1:4), "Unassigned")) +
-  labs(title = "Cell connectivity", x = "GLM-PC1", y = "GLM-PC2") +
-  theme_minimal() +
-  theme(panel.grid    = element_blank(),
-        axis.ticks    = element_blank(),
-        axis.text     = element_blank(),
-        axis.title    = element_blank(),
-        panel.border  = element_rect(color = "black", fill = NA, linewidth = 1),
-        legend.position = "right")
+  coord_cartesian(xlim = c(0, 10), ylim = c(0, 10)) +
+  theme_classic() +
+  theme(
+    panel.grid = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text  = element_blank(),
+    axis.title = element_blank(),
+    legend.position = "none"
+  )
 
-ggsave("cell_connectivity.png", p_net, width = 6.5, height = 5, dpi = 300)
-ggsave("cell_connectivity.pdf", p_net, width = 6.5, height = 5)
-p_net
 
 ```
 
