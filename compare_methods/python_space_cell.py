@@ -26,25 +26,29 @@ PROCESS_NUMBER = 64
 VISIUM = True # visium or slideseq
 EVAL_THETA = 0.01
 NUM_CLUS = 10
+DISABLE_PLOTS = True
 # global data variables
 DATA = None
 GMM_CLUSTERS = None
+
 
 def main():
     # load data
     data = load_data()
     # cluster + refine  thread this later
     best_clustering = cluster_with_gmm(data)
+    # spatial sub clustering 
+    do_spatial_clustering_on_top_of_gmm(data, best_clustering, 7)
     # thread this now
-    #threaded_refine(data, best_clustering)
+    threaded_refine(data, best_clustering)
     #refined = gmm_refine_negbi(data, best_clustering, 0.1, 1)
     # to do, dont do it straight away, save the result from refine and do this later
-    #gmm_refine_negbi(data, best_clustering, 0.1, 1)
+    gmm_refine_negbi(data, best_clustering, 0.1, 1)
+    # make graph
     #weights = graph_for_leiden(data, mode="knn", k=30, save_path="knn_30_graph.graphml")
-    #weights = graph_for_leiden(data, mode="radius", radius=200)
-    #run_leiden(data)
-    #calculate_cell_charter_ari_and_plot(data)
-    do_spatial_clustering_on_top_of_gmm(data, best_clustering, 7)
+    weights = graph_for_leiden(data, mode="radius", radius=200)
+    # leiden
+    run_leiden(data)
     return
 
 def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
@@ -190,8 +194,8 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
         ax.set_xticks(list(k_range))
         ax.legend(fontsize=8)
         plt.tight_layout()
-        plt.savefig(f"gmm_cluster_{cluster_index}_elbow.png", dpi=150, bbox_inches="tight")
-        plt.show()
+        if DISABLE_PLOTS == False:
+            plt.show()
 
         sub_cmap = plt.cm.get_cmap("tab20", best_k)
         fig, ax = plt.subplots(figsize=(8, 7))
@@ -214,8 +218,8 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
         ax.set_aspect("equal")
         ax.legend(fontsize=7, markerscale=1.0, loc="upper right")
         plt.tight_layout()
-        plt.savefig(f"gmm_cluster_{cluster_index}_subclusters.png", dpi=150, bbox_inches="tight")
-        plt.show()
+        if DISABLE_PLOTS == False:
+            plt.show()
 
         spatial_subclusters[cluster_index] = [
             cell_arr[y_sub == s].tolist() for s in range(best_k)
@@ -304,8 +308,8 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
 
     plt.suptitle("Accepted clusters vs ground truth", fontsize=13)
     plt.tight_layout()
-    plt.savefig("spatial_accepted_final.png", dpi=150, bbox_inches="tight")
-    plt.show()
+    if DISABLE_PLOTS == False:
+        plt.show()
 
     return accepted_clusters_list, spatial_centers_of_clusters
 
@@ -1404,6 +1408,7 @@ def load_data():
     spatial     = spatial.loc[barcodes]                 # cells  × 2
     glm_pca     = glm_df.loc[barcodes]                  # cells  × n_components
     labels      = ground_truth.loc[barcodes]            # cells  (Series)
+    print(labels)
     counts = counts_df[barcodes] # cells  × genes
     counts = counts.T
     # calculate the umi per cell (total counts)
