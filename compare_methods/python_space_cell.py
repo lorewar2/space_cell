@@ -74,7 +74,8 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
     print(f"Contiguity link radius: {link_radius:.1f}\n")
 
     n_clusters = len(gmm_clusters)
-    cmap   = plt.cm.get_cmap("tab10", n_clusters)
+    #cmap   = plt.get_cmap("tab10", n_clusters)
+    cmap = plt.get_cmap("tab10", n_clusters)
     colors = {c: cmap(c) for c in range(n_clusters)}
 
     spatial_subclusters = {}
@@ -197,7 +198,7 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
         if DISABLE_PLOTS == False:
             plt.show()
 
-        sub_cmap = plt.cm.get_cmap("tab20", best_k)
+        sub_cmap = plt.get_cmap("tab20", best_k)
         fig, ax = plt.subplots(figsize=(8, 7))
         ax.scatter(all_coords[:, 0], all_coords[:, 1],
                    c="lightgray", s=8, alpha=0.4, linewidths=0)
@@ -274,7 +275,7 @@ def do_spatial_clustering_on_top_of_gmm(data, gmm_clusters, expected_n_clusters,
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
 
     gt_unique = sorted(labels.unique())
-    gt_cmap   = plt.cm.get_cmap("tab10", len(gt_unique))
+    gt_cmap   = plt.get_cmap("tab10", len(gt_unique))
     gt_colors = {v: gt_cmap(i) for i, v in enumerate(gt_unique)}
 
     axes[0].scatter(all_coords[:, 0], all_coords[:, 1],
@@ -412,11 +413,11 @@ def run_leiden(data):
 
     # spatial scatter: ground truth vs Leiden communities 
     gt_unique = sorted(labels.unique())
-    gt_cmap   = plt.cm.get_cmap("tab10", len(gt_unique))
+    gt_cmap   = plt.get_cmap("tab10", len(gt_unique))
     gt_colors = {v: gt_cmap(i) for i, v in enumerate(gt_unique)}
 
     comm_unique = sorted(set(membership))
-    cm_cmap     = plt.cm.get_cmap("gist_rainbow", len(comm_unique))
+    cm_cmap     = plt.get_cmap("gist_rainbow", len(comm_unique))
     cm_colors   = {v: cm_cmap(i) for i, v in enumerate(comm_unique)}
 
     coords = spatial.loc[shared_bcs, ["x", "y"]].values
@@ -1016,12 +1017,12 @@ def kmeans_plot(data, all_cell_per_cluster):
 
     # plot
     gt_unique  = sorted(labels.unique())
-    gt_cmap    = plt.cm.get_cmap("tab10", len(gt_unique))
+    gt_cmap    = plt.get_cmap("tab10", len(gt_unique))
     gt_colors  = {v: gt_cmap(i) for i, v in enumerate(gt_unique)}
     gt_handles = [mpatches.Patch(color=gt_colors[v], label=v) for v in gt_unique]
 
     pred_unique = sorted(np.unique(y_pred))
-    km_cmap     = plt.cm.get_cmap("tab10", len(pred_unique))
+    km_cmap     = plt.get_cmap("tab10", len(pred_unique))
     km_colors   = {v: km_cmap(i) for i, v in enumerate(pred_unique)}
     km_handles  = [mpatches.Patch(color=km_colors[v], label=f"Cluster {v}")
                    for v in pred_unique]
@@ -1129,7 +1130,7 @@ def plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_clus
 
         # Plot
         unique_vals    = sorted(labels.unique())
-        cmap           = plt.cm.get_cmap("tab10", len(unique_vals))
+        cmap           = plt.get_cmap("tab10", len(unique_vals))
         val_to_color   = {v: cmap(i) for i, v in enumerate(unique_vals)}
         cell_color_fn  = lambda bc: val_to_color[labels[bc]]
         legend_handles = [mpatches.Patch(color=val_to_color[v], label=v)
@@ -1138,7 +1139,7 @@ def plot_using_different_loss_functions(data, all_cell_per_cluster, avg_per_clus
         fig, axes = plt.subplots(1, 2, figsize=(16, 7))
         all_coords = spatial[["x", "y"]].values
         all_bcs    = spatial.index.values
-        gt_cmap    = plt.cm.get_cmap("Set2", len(labels.unique()))
+        gt_cmap    = plt.get_cmap("Set2", len(labels.unique()))
         gt_colors  = {cl: gt_cmap(i) for i, cl in enumerate(sorted(labels.unique()))}
         axes[0].scatter(all_coords[:, 0], all_coords[:, 1],
                         c=[gt_colors[labels[bc]] for bc in all_bcs],
@@ -1290,11 +1291,11 @@ def calculate_cell_charter_ari_and_plot(data, cellcharter_path="./cell_clusters_
 
     # colour maps (same scheme as run_leiden)
     gt_unique = sorted(labels.unique())
-    gt_cmap   = plt.cm.get_cmap("tab10", len(gt_unique))
+    gt_cmap   = plt.get_cmap("tab10", len(gt_unique))
     gt_colors = {v: gt_cmap(i) for i, v in enumerate(gt_unique)}
 
     comm_unique = sorted(set(y_pred))
-    cm_cmap     = plt.cm.get_cmap("gist_rainbow", len(comm_unique))
+    cm_cmap     = plt.get_cmap("gist_rainbow", len(comm_unique))
     cm_colors   = {v: cm_cmap(i) for i, v in enumerate(comm_unique)}
 
     coords = spatial.loc[shared_bcs, ["x", "y"]].values
